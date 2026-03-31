@@ -27,6 +27,15 @@ const C = {
 
 const METHODOLOGY_VERSION = 'FL-2026.03-v3.0'
 const METHODOLOGY_HASH = 'b7a4f3e2c1d09f8e'
+const MAX_TABLE_CELL_CHARS = 1200
+const MAX_TABLE_CELL_LINES = 14
+const HUMAN_APPROVAL_FIELDS = new Set([
+  'lawful_basis',
+  'decision_maker',
+  'oversight_contact',
+  'oversight_description',
+  'annex_confirmation',
+])
 
 const PW = 210, PH = 297 // A4 in mm
 const M = 20             // Margin
@@ -129,6 +138,9 @@ function normalizeCompliance(meta) {
   const requiredStrings = Object.keys(base).filter(k => typeof base[k] === 'string')
   for (const key of requiredStrings) {
     if (!merged[key] || !String(merged[key]).trim()) merged[key] = 'NOT PROVIDED'
+    if (HUMAN_APPROVAL_FIELDS.has(key) && /^(auto[\s-_]?computed|auto[\s-_]?generated|inferred|estimated)$/i.test(String(merged[key]).trim())) {
+      merged[key] = 'NOT PROVIDED'
+    }
   }
   return merged
 }
@@ -359,13 +371,31 @@ function drawGridTable(doc, headers, rows, y, colWidths) {
   y = checkPage(doc, y, headerH + 5)
   y = drawHeader(y)
 
+  const getCellLines = (rawText, colWidth) => {
+    const availableWidth = Math.max(8, colWidth - 4)
+    let text = safeStr(rawText ?? '-').replace(/\s+/g, ' ').trim() || '-'
+    let truncated = false
+    if (text.length > MAX_TABLE_CELL_CHARS) {
+      text = `${text.slice(0, MAX_TABLE_CELL_CHARS)}...`
+      truncated = true
+    }
+    let lines = doc.splitTextToSize(text, availableWidth)
+    if (lines.length > MAX_TABLE_CELL_LINES) {
+      lines = lines.slice(0, MAX_TABLE_CELL_LINES)
+      truncated = true
+    }
+    if (truncated) {
+      const suffix = ' [truncated]'
+      const last = lines[lines.length - 1] || ''
+      lines[lines.length - 1] = doc.splitTextToSize(`${last}${suffix}`, availableWidth)[0] || suffix
+    }
+    return lines
+  }
+
   for (let r = 0; r < rows.length; r++) {
     let rowHeight = headerH
-    const cellHeights = rows[r].map((cell, idx) => {
-      const txt = safeStr(cell.text ?? '-')
-      const lines = doc.splitTextToSize(txt, colWidths[idx] - 4)
-      return Math.max(headerH, lines.length * lineHeight + padY * 2)
-    })
+    const preparedCells = rows[r].map((cell, idx) => ({ cell, lines: getCellLines(cell.text, colWidths[idx]) }))
+    const cellHeights = preparedCells.map(({ lines }) => Math.max(headerH, lines.length * lineHeight + padY * 2))
     rowHeight = Math.max(...cellHeights)
 
     if (y + rowHeight > maxY) {
@@ -378,10 +408,8 @@ function drawGridTable(doc, headers, rows, y, colWidths) {
     if (r % 2 === 1) { doc.setFillColor(...C.surface); doc.rect(M, y, CW, rowHeight, 'F') }
     doc.setFontSize(8); doc.setFont('helvetica', 'normal'); doc.setTextColor(...C.text)
     let x = M + 2
-    for (let i = 0; i < rows[r].length; i++) {
-      const cell = rows[r][i]
-      const txt = safeStr(cell.text ?? '-')
-      const lines = doc.splitTextToSize(txt, colWidths[i] - 4)
+    for (let i = 0; i < preparedCells.length; i++) {
+      const { cell, lines } = preparedCells[i]
       doc.setTextColor(...(cell.color || C.text))
       doc.setFont('helvetica', cell.bold ? 'bold' : 'normal')
       let cy = y + padY + 3

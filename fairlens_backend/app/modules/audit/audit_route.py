@@ -25,6 +25,20 @@ from app.modules.audit.compliance_store import ComplianceFileStore
 
 router = APIRouter(tags=["Audit"])
 store = ComplianceFileStore()
+HUMAN_APPROVAL_FIELDS = {
+    "lawful_basis",
+    "decision_maker",
+    "oversight_contact",
+    "oversight_description",
+    "annex_confirmation",
+}
+AUTO_GENERATED_MARKERS = {
+    "auto_computed",
+    "auto-generated",
+    "auto_generated",
+    "inferred",
+    "estimated",
+}
 
 
 def _iso_now() -> str:
@@ -140,7 +154,10 @@ def _normalize_structured_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
     for key, field in ComplianceMetadata.model_fields.items():
         if _is_string_field(field.annotation):
             val = metadata.get(key)
-            metadata[key] = str(val).strip() if val is not None and str(val).strip() else "NOT PROVIDED"
+            normalized = str(val).strip() if val is not None and str(val).strip() else "NOT PROVIDED"
+            if key in HUMAN_APPROVAL_FIELDS and normalized.lower() in AUTO_GENERATED_MARKERS:
+                normalized = "NOT PROVIDED"
+            metadata[key] = normalized
 
     if not isinstance(metadata.get("risk_register"), list):
         metadata["risk_register"] = []
