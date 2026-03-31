@@ -5,6 +5,7 @@ Called by analyse_route.py — never directly by external requests.
 """
 
 import os
+import ssl
 import httpx
 from dotenv import load_dotenv
 
@@ -17,11 +18,31 @@ from app.helper.general_helper import (
 
 load_dotenv()
 
+def _build_gemini_url() -> str:
+    override = os.getenv("GEMINI_API_URL")
+    if override:
+        return override
+    base = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/models/")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    base = base.rstrip("/")
+    if base.endswith(":generateContent"):
+        return base
+    return f"{base}/{model}:generateContent"
+
+
+def _unwrap_ssl_error(exc: Exception) -> ssl.SSLCertVerificationError | None:
+    seen = set()
+    cur = exc
+    while cur and id(cur) not in seen:
+        if isinstance(cur, ssl.SSLCertVerificationError):
+            return cur
+        seen.add(id(cur))
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return None
+
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash:generateContent"
-)
+GEMINI_URL = _build_gemini_url()
 
 
 async def run_analysis(request: AnalyseRequest) -> AnalyseResponse:
@@ -38,12 +59,21 @@ async def run_analysis(request: AnalyseRequest) -> AnalyseResponse:
         },
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            GEMINI_URL,
-            params={"key": GEMINI_API_KEY},
-            json=payload,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                GEMINI_URL,
+                params={"key": GEMINI_API_KEY},
+                json=payload,
+            )
+    except httpx.TransportError as exc:
+        ssl_err = _unwrap_ssl_error(exc)
+        if ssl_err:
+            raise RuntimeError(
+                "Gemini TLS verification failed. Set GEMINI_API_URL or GEMINI_BASE_URL "
+                "to a reachable host whose certificate matches."
+            ) from ssl_err
+        raise
 
     if response.status_code != 200:
         raise RuntimeError(
