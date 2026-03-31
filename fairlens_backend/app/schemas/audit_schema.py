@@ -167,15 +167,60 @@ class ChatResponse(BaseModel):
 
 
 class ComplianceMetadata(BaseModel):
-    lawful_basis: Optional[str] = None
-    dpia_status: Optional[str] = None
-    dpia_link: Optional[str] = None
-    dpo_contact: Optional[str] = None
-    oversight_contact: Optional[str] = None
-    nca_jurisdiction: Optional[str] = None
-    monitoring_cadence: Optional[str] = None
-    escalation_plan: Optional[str] = None
-    annex_confirmation: Optional[str] = None
+    dataset_name: str = "NOT PROVIDED"
+    dataset_version: str = "NOT PROVIDED"
+    data_source: str = "NOT PROVIDED"
+    collection_method: str = "NOT PROVIDED"
+    labeling_method: str = "NOT PROVIDED"
+    preprocessing_steps: str = "NOT PROVIDED"
+    known_biases: str = "NOT PROVIDED"
+    data_minimization_justification: str = "NOT PROVIDED"
+
+    annex_classification: str = "NOT PROVIDED"
+    decision_maker: str = "NOT PROVIDED"
+    decision_date: str = "NOT PROVIDED"
+    justification: str = "NOT PROVIDED"
+
+    risk_register: List[Dict[str, Any]] = Field(default_factory=list)
+
+    lawful_basis: str = "NOT PROVIDED"
+    purpose_of_processing: str = "NOT PROVIDED"
+    data_categories: str = "NOT PROVIDED"
+    retention_period: str = "NOT PROVIDED"
+    dpia_status: str = "NOT PROVIDED"
+    dpia_link: str = "NOT PROVIDED"
+    dsar_process_description: str = "NOT PROVIDED"
+    dpo_contact: str = "NOT PROVIDED"
+    oversight_contact: str = "NOT PROVIDED"
+
+    oversight_description: str = "NOT PROVIDED"
+    escalation_contact: str = "NOT PROVIDED"
+    review_sla: str = "NOT PROVIDED"
+    human_intervention_points: str = "NOT PROVIDED"
+
+    per_group_metrics: List[Dict[str, Any]] = Field(default_factory=list)
+    ood_testing: str = "NOT PROVIDED"
+    adversarial_testing: str = "NOT PROVIDED"
+    security_assessment_link: str = "NOT PROVIDED"
+    validator_name: str = "NOT PROVIDED"
+    validation_date: str = "NOT PROVIDED"
+
+    log_retention_policy: str = "NOT PROVIDED"
+    log_storage_location: str = "NOT PROVIDED"
+    monitoring_frequency: str = "NOT PROVIDED"
+    alert_channel: str = "NOT PROVIDED"
+    incident_response_description: str = "NOT PROVIDED"
+
+    intended_use: str = "NOT PROVIDED"
+    intended_users: str = "NOT PROVIDED"
+    limitations: str = "NOT PROVIDED"
+    known_failure_modes: str = "NOT PROVIDED"
+    instructions_for_use: str = "NOT PROVIDED"
+
+    nca_jurisdiction: str = "NOT PROVIDED"
+    monitoring_cadence: str = "NOT PROVIDED"
+    escalation_plan: str = "NOT PROVIDED"
+    annex_confirmation: str = "NOT PROVIDED"
     countersignatures: List[Dict[str, Any]] = Field(default_factory=list)
     robustness_validation: Dict[str, Any] = Field(default_factory=dict)
 

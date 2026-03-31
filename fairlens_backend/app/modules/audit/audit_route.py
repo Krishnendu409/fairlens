@@ -3,10 +3,12 @@ audit_route.py — audit endpoints + compliance record persistence
 """
 
 import uuid
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, get_args, get_origin
 
 from fastapi import APIRouter, HTTPException
+from pydantic import ValidationError
 
 from app.schemas.audit_schema import (
     AuditRequest,
@@ -24,6 +26,14 @@ from app.modules.audit.compliance_store import ComplianceFileStore
 
 router = APIRouter(tags=["Audit"])
 store = ComplianceFileStore()
+HUMAN_APPROVAL_FIELDS = {
+    "lawful_basis",
+    "decision_maker",
+    "oversight_contact",
+    "oversight_description",
+    "annex_confirmation",
+}
+AUTO_GENERATED_PLACEHOLDER_REGEX = re.compile(r"^(auto[\s-_]?computed|auto[\s-_]?generated|inferred|estimated)$", re.IGNORECASE)
 
 
 def _iso_now() -> str:
@@ -33,7 +43,10 @@ def _iso_now() -> str:
 def _merge_metadata(
     incoming: Optional[ComplianceMetadata], existing: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    base = ComplianceMetadata(**(existing or {})).model_dump()
+    try:
+        base = ComplianceMetadata(**(existing or {})).model_dump()
+    except ValidationError:
+        base = ComplianceMetadata().model_dump()
     if incoming:
         inc = incoming.model_dump(exclude_none=True)
         for key, value in inc.items():
@@ -123,6 +136,35 @@ def _validate_roles(metadata: Dict[str, Any]) -> None:
         )
 
 
+def _normalize_structured_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    def _is_string_field(annotation: Any) -> bool:
+        if annotation is str:
+            return True
+        origin = get_origin(annotation)
+        if origin is None:
+            return False
+        args = get_args(annotation)
+        return len(args) == 2 and str in args and type(None) in args
+
+    for key, field in ComplianceMetadata.model_fields.items():
+        if _is_string_field(field.annotation):
+            val = metadata.get(key)
+            normalized = str(val).strip() if val is not None and str(val).strip() else "NOT PROVIDED"
+            if key in HUMAN_APPROVAL_FIELDS and AUTO_GENERATED_PLACEHOLDER_REGEX.match(normalized):
+                normalized = "NOT PROVIDED"
+            metadata[key] = normalized
+
+    if not isinstance(metadata.get("risk_register"), list):
+        metadata["risk_register"] = []
+    if not isinstance(metadata.get("per_group_metrics"), list):
+        metadata["per_group_metrics"] = []
+    if not isinstance(metadata.get("countersignatures"), list):
+        metadata["countersignatures"] = []
+    if not isinstance(metadata.get("robustness_validation"), dict):
+        metadata["robustness_validation"] = {}
+    return metadata
+
+
 def _build_record(payload: ComplianceRecordRequest, mark_export: bool) -> ComplianceRecordResponse:
     existing: Optional[Dict[str, Any]] = None
     previous_hash: Optional[str] = None
@@ -144,6 +186,7 @@ def _build_record(payload: ComplianceRecordRequest, mark_export: bool) -> Compli
     base_metadata["robustness_validation"] = _derive_robustness(
         payload.audit_result, base_metadata.get("robustness_validation")
     )
+    base_metadata = _normalize_structured_metadata(base_metadata)
     _validate_roles(base_metadata)
 
     if existing and existing.get("deployment_locked"):

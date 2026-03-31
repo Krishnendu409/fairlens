@@ -1,3 +1,4 @@
+import fcntl
 import hashlib
 import json
 import os
@@ -28,7 +29,13 @@ class ComplianceFileStore:
 
     def _write_index(self, index: Dict[str, str]) -> None:
         with open(self.index_file, "w", encoding="utf-8") as f:
-            json.dump(index, f, indent=2)
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                f.truncate()
+                json.dump(index, f, indent=2)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
     # ── Hashing ────────────────────────────────────────────────────────────────
     def compute_integrity_hash(self, record_id: str, updated_at: str, compliance_metadata: Dict[str, Any]) -> str:
