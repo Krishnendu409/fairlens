@@ -136,6 +136,8 @@ const TABS = [
   { id: 'ask',          label: 'Ask AI',         icon: 'chat'      },
 ]
 
+const normalizeGroup = v => v === null || v === undefined ? '' : String(v)
+
 // ── Counterfactual Editor ─────────────────────────────────────────────────────
 function CounterfactualEditor({ sampleRows, sensitiveCol, groupRatesMap }) {
   const [selectedRowIndex, setSelectedRowIndex] = useState(null)
@@ -143,14 +145,27 @@ function CounterfactualEditor({ sampleRows, sensitiveCol, groupRatesMap }) {
 
   if (!sampleRows || sampleRows.length === 0) return <p style={{ color: 'var(--text-muted)' }}>No sample data available for what-if analysis.</p>
 
+  const normalizedRates = Object.entries(groupRatesMap || {}).reduce((acc, [k, v]) => {
+    acc[normalizeGroup(k)] = v
+    return acc
+  }, {})
+
+  useEffect(() => {
+    if (selectedRowIndex === null && sampleRows.length > 0) {
+      const initialValue = normalizeGroup(sampleRows[0][sensitiveCol])
+      setSelectedRowIndex(0)
+      setEditedValue(initialValue)
+    }
+  }, [selectedRowIndex, sampleRows, sensitiveCol])
+
   const activeRow = selectedRowIndex !== null ? sampleRows[selectedRowIndex] : null
-  const originalValue = activeRow ? activeRow[sensitiveCol] : null
+  const originalValue = activeRow ? normalizeGroup(activeRow[sensitiveCol]) : ''
   
-  const originalRate = originalValue ? groupRatesMap[originalValue] : null
-  const newRate = editedValue ? groupRatesMap[editedValue] : null
+  const originalRate = originalValue ? normalizedRates[originalValue] : null
+  const newRate = editedValue ? normalizedRates[editedValue] : null
   const diff = (originalRate != null && newRate != null) ? (newRate - originalRate) * 100 : 0
   
-  const availableGroups = Object.keys(groupRatesMap)
+  const availableGroups = Object.keys(normalizedRates)
 
   return (
     <div className={styles.cfContainer}>
@@ -163,7 +178,7 @@ function CounterfactualEditor({ sampleRows, sensitiveCol, groupRatesMap }) {
           </thead>
           <tbody>
             {sampleRows.map((row, i) => (
-              <tr key={i} className={selectedRowIndex === i ? styles.cfActiveRow : ''} onClick={() => { setSelectedRowIndex(i); setEditedValue(row[sensitiveCol]) }}>
+              <tr key={i} className={selectedRowIndex === i ? styles.cfActiveRow : ''} onClick={() => { setSelectedRowIndex(i); setEditedValue(normalizeGroup(row[sensitiveCol])) }}>
                 {Object.keys(row).slice(0, 10).map(k => <td key={k}>{String(row[k])}</td>)}
               </tr>
             ))}
