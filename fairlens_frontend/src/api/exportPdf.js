@@ -7,6 +7,7 @@
  */
 
 import { jsPDF } from 'jspdf'
+import { createComplianceSnapshot } from './compliance'
 
 // ── FairLens Light/White Theme ───────────────────────────────────────────────
 const C = {
@@ -32,6 +33,26 @@ const M = 20             // Margin
 const CW = PW - 2 * M    // Content Width
 const FOOTER_H = 15
 
+const EMPTY_COMPLIANCE = {
+  lawful_basis: null,
+  dpia_status: null,
+  dpia_link: null,
+  dpo_contact: null,
+  oversight_contact: null,
+  nca_jurisdiction: null,
+  monitoring_cadence: null,
+  escalation_plan: null,
+  annex_confirmation: null,
+  countersignatures: [],
+  robustness_validation: {
+    status: 'not_documented',
+    validator_role: 'Technical Lead / Model Developer',
+    per_group: [],
+    ood_testing: { status: 'not_documented' },
+    adversarial_testing: { status: 'not_documented' },
+  },
+}
+
 // ── Strict Definitions ───────────────────────────────────────────────────────
 const METRIC_DEFS = {
   'demographic_parity_difference': 'Measures the absolute difference in positive outcome rates between groups. A lower score means groups are treated more equally.',
@@ -50,6 +71,35 @@ function safeStr(str) {
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/↑/g, '(Up)')
     .replace(/↓/g, '(Down)')
+}
+
+function normalizeCompliance(meta) {
+  const base = JSON.parse(JSON.stringify(EMPTY_COMPLIANCE))
+  if (!meta) return base
+  const merged = { ...base, ...meta }
+  merged.countersignatures = Array.isArray(meta?.countersignatures) ? meta.countersignatures : []
+  const rv = meta?.robustness_validation || {}
+  merged.robustness_validation = {
+    ...base.robustness_validation,
+    ...rv,
+    per_group: Array.isArray(rv.per_group) ? rv.per_group : [],
+    ood_testing: rv.ood_testing || { status: 'not_documented' },
+    adversarial_testing: rv.adversarial_testing || { status: 'not_documented' },
+  }
+  return merged
+}
+
+function formatStatusLabel(status, role) {
+  if (status === 'validated') return 'VALIDATED'
+  if (status === 'pending_validation') return `AUTO-COMPUTED — pending validation${role ? ` (${role})` : ''}`
+  if (status === 'not_documented') return 'NOT DOCUMENTED'
+  return safeStr(status || 'NOT DOCUMENTED')
+}
+
+function statusColor(status) {
+  if (status === 'validated') return C.green
+  if (status === 'pending_validation') return C.amber
+  return C.red
 }
 
 function generateVerificationHash(str) {
@@ -236,39 +286,63 @@ function drawBarChart(doc, data, labelCol, valCol, x, y, w, h) {
 }
 
 function drawGridTable(doc, headers, rows, y, colWidths) {
-  const rowH = 8
-  y = checkPage(doc, y, rowH + 5)
-  
-  // Header
-  doc.setFillColor(...C.surface2)
-  doc.rect(M, y, CW, rowH, 'F')
-  doc.setDrawColor(...C.border); doc.setLineWidth(0.3)
-  doc.line(M, y, M + CW, y)
-  doc.line(M, y + rowH, M + CW, y + rowH)
-  
-  doc.setFontSize(8); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.primary)
-  let x = M + 2
-  for (let i = 0; i < headers.length; i++) {
-    doc.text(safeStr(headers[i]), x, y + 5.5)
-    x += colWidths[i]
+  const headerH = 8
+  const padY = 2.5
+  const lineHeight = 3.6
+  const maxY = PH - FOOTER_H - 15
+
+  const drawHeader = (startY) => {
+    doc.setFillColor(...C.surface2)
+    doc.rect(M, startY, CW, headerH, 'F')
+    doc.setDrawColor(...C.border); doc.setLineWidth(0.3)
+    doc.line(M, startY, M + CW, startY)
+    doc.line(M, startY + headerH, M + CW, startY + headerH)
+
+    doc.setFontSize(8); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.primary)
+    let hx = M + 2
+    for (let i = 0; i < headers.length; i++) {
+      doc.text(safeStr(headers[i]), hx, startY + 5.5)
+      hx += colWidths[i]
+    }
+    return startY + headerH
   }
-  y += rowH
-  
-  // Rows
+
+  y = checkPage(doc, y, headerH + 5)
+  y = drawHeader(y)
+
   for (let r = 0; r < rows.length; r++) {
-    y = checkPage(doc, y, rowH)
-    if (r % 2 === 1) { doc.setFillColor(...C.surface); doc.rect(M, y, CW, rowH, 'F') }
+    let rowHeight = headerH
+    const cellHeights = rows[r].map((cell, idx) => {
+      const txt = safeStr(cell.text ?? '-')
+      const lines = doc.splitTextToSize(txt, colWidths[idx] - 4)
+      return Math.max(headerH, lines.length * lineHeight + padY * 2)
+    })
+    rowHeight = Math.max(...cellHeights)
+
+    if (y + rowHeight > maxY) {
+      pageFooter(doc)
+      doc.addPage()
+      doc.setFillColor(...C.bg); doc.rect(0, 0, PW, PH, 'F')
+      y = drawHeader(M + 10)
+    }
+
+    if (r % 2 === 1) { doc.setFillColor(...C.surface); doc.rect(M, y, CW, rowHeight, 'F') }
     doc.setFontSize(8); doc.setFont('helvetica', 'normal'); doc.setTextColor(...C.text)
-    x = M + 2
+    let x = M + 2
     for (let i = 0; i < rows[r].length; i++) {
       const cell = rows[r][i]
+      const txt = safeStr(cell.text ?? '-')
+      const lines = doc.splitTextToSize(txt, colWidths[i] - 4)
       doc.setTextColor(...(cell.color || C.text))
-      if (cell.bold) doc.setFont('helvetica', 'bold')
-      else doc.setFont('helvetica', 'normal')
-      doc.text(safeStr(cell.text ?? '-'), x, y + 5.5)
+      doc.setFont('helvetica', cell.bold ? 'bold' : 'normal')
+      let cy = y + padY + 3
+      for (const line of lines) {
+        doc.text(line, x, cy)
+        cy += lineHeight
+      }
       x += colWidths[i]
     }
-    y += rowH
+    y += rowHeight
   }
   doc.line(M, y, M + CW, y)
   return y + 8
@@ -292,7 +366,25 @@ export async function exportAuditToPdf(result, description) {
   const dateStr = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })
   const euRisk = getEURiskClass(result.bias_score ?? 0)
   
-  const vHash = generateVerificationHash(JSON.stringify(result) + ts)
+  let compliance = normalizeCompliance(result?.compliance_metadata)
+  let integrityHash = generateVerificationHash(JSON.stringify(result) + ts)
+  let exportHash = integrityHash
+  let recordId = null
+  let hashValid = false
+
+  try {
+    const snapshot = await createComplianceSnapshot({
+      audit_result: result,
+      compliance_metadata: result?.compliance_metadata || undefined,
+    })
+    compliance = normalizeCompliance(snapshot?.compliance_metadata)
+    integrityHash = snapshot?.integrity_hash || integrityHash
+    exportHash = snapshot?.export_integrity_hash || integrityHash
+    recordId = snapshot?.record_id || null
+    hashValid = !!snapshot?.hash_valid
+  } catch (err) {
+    console.warn('Failed to persist compliance record, falling back to local hash.', err)
+  }
 
   doc.setFillColor(...C.bg); doc.rect(0, 0, PW, PH, 'F')
 
@@ -318,6 +410,11 @@ export async function exportAuditToPdf(result, description) {
   cy = dataRow(doc, 'DATASET', description || 'Not specified', cy)
   cy = dataRow(doc, 'RECORDS PROCESSED', result.total_rows?.toLocaleString() ?? '-', cy)
   cy = dataRow(doc, 'SENSITIVE ATTRIBUTE', result.sensitive_column ?? 'auto-detected', cy)
+  cy = dataRow(doc, 'COMPLIANCE RECORD', recordId || 'Not stored (offline export)', cy, recordId ? C.text : C.amber)
+  cy = dataRow(doc, 'INTEGRITY HASH (EXPORT)', exportHash, cy, hashValid ? C.green : C.muted)
+  if (integrityHash && integrityHash !== exportHash) {
+    cy = dataRow(doc, 'INTEGRITY HASH (CURRENT)', integrityHash, cy, C.text)
+  }
   cy = dataRow(doc, 'TARGET DECISION', result.target_column ?? 'auto-detected', cy)
   cy = dataRow(doc, 'COMPLIANCE AUDITOR', 'FairLens System (Automated)', cy)
   
@@ -692,11 +789,18 @@ export async function exportAuditToPdf(result, description) {
   }
 
   y = subHeading(doc, 'Robustness & Accuracy Checklist', y)
+  const robustness = compliance.robustness_validation || {}
+  const robustStatus = formatStatusLabel(robustness.status, robustness.validator_role)
+  const robustColor = statusColor(robustness.status)
+  const oodStatus = formatStatusLabel(robustness.ood_testing?.status, robustness.ood_testing?.validator_role)
+  const oodColor = statusColor(robustness.ood_testing?.status)
+  const advStatus = formatStatusLabel(robustness.adversarial_testing?.status, robustness.adversarial_testing?.validator_role)
+  const advColor = statusColor(robustness.adversarial_testing?.status)
   const robustRows = [
-    [{ text: 'Confusion matrix per group (TP / TN / FP / FN)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Compute vs. ground truth before deployment' }],
-    [{ text: 'Precision / Recall / F1 breakdown by group' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Required for equalized odds assessment' }],
-    [{ text: 'Out-of-distribution (OOD) performance testing' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Test model outside training distribution' }],
-    [{ text: 'Adversarial robustness assessment' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Assess adversarial and edge-case inputs' }],
+    [{ text: 'Confusion matrix per group (TP / TN / FP / FN)' }, { text: robustStatus, color: robustColor }, { text: 'Compute vs. ground truth before deployment' }],
+    [{ text: 'Precision / Recall / F1 breakdown by group' }, { text: robustStatus, color: robustColor }, { text: 'Required for equalized odds assessment; validation required by Technical Lead' }],
+    [{ text: 'Out-of-distribution (OOD) performance testing' }, { text: oodStatus, color: oodColor }, { text: 'Test model outside training distribution' }],
+    [{ text: 'Adversarial robustness assessment' }, { text: advStatus, color: advColor }, { text: 'Assess adversarial and edge-case inputs' }],
     [{ text: 'Cybersecurity vulnerability assessment' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Data poisoning / model extraction / inference' }],
     [{ text: 'Model version & change management log (Art. 11(1)(j))' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Retain versioned technical file 10 years' }],
   ]
@@ -712,6 +816,8 @@ export async function exportAuditToPdf(result, description) {
   y = subHeading(doc, 'DPIA Trigger Assessment (GDPR Art. 35)', y)
   const hasSensitiveCol = !!result.sensitive_column
   const largeDataset = (result.total_rows ?? 0) > 1000
+  const dpiaStatus = compliance.dpia_status
+  const dpiaColor = dpiaStatus ? C.green : C.red
   const dpiaRows = [
     [
       { text: 'Systematic processing linked to protected characteristic' },
@@ -730,23 +836,27 @@ export async function exportAuditToPdf(result, description) {
     ],
     [
       { text: 'DPIA conducted and documented' },
-      { text: 'NOT COMPLETED', color: C.red },
-      { text: 'CRITICAL: Conduct DPIA; involve DPO before deployment' },
+      { text: dpiaStatus ? dpiaStatus.toUpperCase() : 'NOT COMPLETED', color: dpiaColor },
+      { text: dpiaStatus ? `DPIA status recorded${compliance.dpia_link ? ' — see link' : ''}` : 'CRITICAL: Conduct DPIA; involve DPO before deployment' },
     ],
   ]
   y = drawGridTable(doc, ['DPIA Criterion', 'Status', 'Notes'], dpiaRows, y, [80, 30, 60])
   y += 4
 
   y = subHeading(doc, 'GDPR Obligations Checklist (Arts. 6, 15-22)', y)
+  const lawfulBasis = compliance.lawful_basis
+  const lawfulColor = lawfulBasis ? C.green : C.red
+  const dpoContact = compliance.dpo_contact
+  const oversightContact = compliance.oversight_contact
   const gdprRows = [
-    [{ text: 'Lawful basis for processing identified (Art. 6)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Document: consent / contract / legal obligation' }],
+    [{ text: 'Lawful basis for processing identified (Art. 6)' }, { text: lawfulBasis ? 'DOCUMENTED' : 'NOT DOCUMENTED', color: lawfulColor }, { text: lawfulBasis || 'Document: consent / contract / legal obligation' }],
     [{ text: 'Data subject access rights mechanism (Art. 15)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Process for data subject access requests' }],
     [{ text: 'Right to erasure / deletion (Art. 17)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Define deletion schedule and request handling' }],
-    [{ text: 'Right to object to automated processing (Art. 21)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Contact point and response SLA for objections' }],
-    [{ text: 'Right to human review of automated decision (Art. 22)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Named human reviewer and escalation path' }],
+    [{ text: 'Right to object to automated processing (Art. 21)' }, { text: oversightContact ? 'PENDING HUMAN OVERSIGHT' : 'NOT DOCUMENTED', color: oversightContact ? C.amber : C.red }, { text: oversightContact ? `Escalation contact: ${oversightContact}` : 'Contact point and response SLA for objections' }],
+    [{ text: 'Right to human review of automated decision (Art. 22)' }, { text: oversightContact ? 'ASSIGNED' : 'NOT DOCUMENTED', color: oversightContact ? C.amber : C.red }, { text: oversightContact ? `Human reviewer / oversight: ${oversightContact}` : 'Named human reviewer and escalation path' }],
     [{ text: 'Data retention and deletion schedule (Art. 5(1)(e))' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Define retention period; delete when no longer needed' }],
     [{ text: 'Third-party data processor agreements (Art. 28)' }, { text: 'NOT DOCUMENTED', color: C.amber }, { text: 'DPA required if AI model hosted externally' }],
-    [{ text: 'DPO sign-off on DPIA' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Formal DPO review required when DPIA is triggered' }],
+    [{ text: 'DPO sign-off on DPIA' }, { text: dpoContact ? 'PENDING SIGN-OFF' : 'NOT DOCUMENTED', color: dpoContact ? C.amber : C.red }, { text: dpoContact ? `DPO contact recorded: ${dpoContact}` : 'Formal DPO review required when DPIA is triggered' }],
   ]
   y = drawGridTable(doc, ['GDPR Obligation', 'Status', 'Action Required'], gdprRows, y, [80, 30, 60])
   y += 4
@@ -759,12 +869,16 @@ export async function exportAuditToPdf(result, description) {
 
   y = subHeading(doc, 'Monitoring Plan Template (Art. 72)', y)
   const currentDpd = result.metrics?.find(m => m.key === 'demographic_parity_difference')?.value ?? 0
+  const monitoringCadence = compliance.monitoring_cadence
+  const escalationPlan = compliance.escalation_plan
+  const ncaJurisdiction = compliance.nca_jurisdiction
+  const annexConfirmation = compliance.annex_confirmation
   const monitorRows = [
-    [{ text: 'Periodic bias re-audit cadence' }, { text: 'DEFINE', color: C.amber }, { text: 'Recommended: quarterly, or per 10% dataset update' }],
+    [{ text: 'Periodic bias re-audit cadence' }, { text: monitoringCadence ? 'DOCUMENTED' : 'DEFINE', color: monitoringCadence ? C.green : C.amber }, { text: monitoringCadence || 'Recommended: quarterly, or per 10% dataset update' }],
     [{ text: 'DPD drift alert threshold' }, { text: 'DEFINE', color: C.amber }, { text: `Alert if DPD exceeds ${(currentDpd * 1.2 || 0.12).toFixed(3)} (20% above current)` }],
     [{ text: 'DIR drift alert threshold' }, { text: 'DEFINE', color: C.amber }, { text: 'Alert if DIR < 0.80 (EU threshold) or 10% below current' }],
-    [{ text: 'New protected group detection protocol' }, { text: 'DEFINE', color: C.amber }, { text: 'Re-audit when new groups appear in production data' }],
-    [{ text: 'Escalation procedure when thresholds exceeded' }, { text: 'DEFINE', color: C.amber }, { text: 'Define: notification chain, timeline, actions' }],
+    [{ text: 'New protected group detection protocol' }, { text: annexConfirmation ? 'DOCUMENTED' : 'DEFINE', color: annexConfirmation ? C.green : C.amber }, { text: annexConfirmation || 'Re-audit when new groups appear in production data' }],
+    [{ text: 'Escalation procedure when thresholds exceeded' }, { text: escalationPlan ? 'DOCUMENTED' : 'DEFINE', color: escalationPlan ? C.green : C.amber }, { text: escalationPlan || 'Define: notification chain, timeline, actions' }],
     [{ text: 'Technical documentation retention (Art. 18)' }, { text: 'REQUIRED', color: C.red }, { text: 'Retain technical file 10 years post-deployment' }],
   ]
   y = drawGridTable(doc, ['Monitoring Element', 'Status', 'Guidance'], monitorRows, y, [78, 22, 70])
@@ -773,9 +887,9 @@ export async function exportAuditToPdf(result, description) {
   y = subHeading(doc, 'Serious Incident Reporting Obligations (Art. 73)', y)
   const incidentRows = [
     [{ text: 'Serious incident definition documented' }, { text: 'REQUIRED', color: C.red }, { text: 'Any incident causing or risking harm to individuals' }],
-    [{ text: 'Named NCA liaison for incident notifications' }, { text: 'DEFINE', color: C.amber }, { text: 'Assign person responsible for NCA reporting' }],
+    [{ text: 'Named NCA liaison for incident notifications' }, { text: ncaJurisdiction ? 'DOCUMENTED' : 'DEFINE', color: ncaJurisdiction ? C.green : C.amber }, { text: ncaJurisdiction ? `NCA jurisdiction: ${ncaJurisdiction}` : 'Assign person responsible for NCA reporting' }],
     [{ text: 'Reporting timeline complied with (Art. 73(3))' }, { text: 'REQUIRED', color: C.red }, { text: 'Notify NCA within 15 days of awareness' }],
-    [{ text: 'Geographic scope and NCA jurisdiction documented' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Required to identify which NCA has jurisdiction' }],
+    [{ text: 'Geographic scope and NCA jurisdiction documented' }, { text: ncaJurisdiction ? 'DOCUMENTED' : 'NOT DOCUMENTED', color: ncaJurisdiction ? C.green : C.red }, { text: ncaJurisdiction || 'Required to identify which NCA has jurisdiction' }],
   ]
   y = drawGridTable(doc, ['Incident Reporting Element', 'Status', 'Notes'], incidentRows, y, [78, 22, 70])
   y += 6
@@ -801,16 +915,22 @@ export async function exportAuditToPdf(result, description) {
   doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.primary)
   doc.text('AUTOMATED INTEGRITY SEAL (Document Verification Only)', M + 5, y + 8)
   doc.setFontSize(8.5); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.text)
-  doc.text(`Integrity Hash: ${vHash}`, M + 5, y + 15)
-  doc.text(`Generated: ${ts}`, M + 5, y + 20)
+  doc.text(`Compliance Record: ${recordId || 'N/A'}`, M + 5, y + 15)
+  doc.text(`Export Hash: ${exportHash}`, M + 5, y + 20)
+  if (integrityHash && integrityHash !== exportHash) {
+    doc.text(`Current Hash: ${integrityHash}`, M + 5, y + 25)
+  }
+  doc.setTextColor(...(hashValid ? C.green : C.amber))
+  doc.text(`Hash Verification: ${hashValid ? 'VERIFIED AGAINST SERVER RECORD' : 'UNVERIFIED SNAPSHOT'}`, M + 5, y + 30)
   doc.setFontSize(8); doc.setFont('helvetica', 'normal'); doc.setTextColor(...C.muted)
   const sealLines = [
+    'Hash = SHA256(record_id | updated_at | sorted compliance metadata).',
     'Article 10 (Data Governance): Protected group anomalies quantified and recorded.',
     'Article 11 (Technical Documentation): Dataset profile and analytical logic persisted.',
     'Article 12 (Record Logging): Integrity hash stored for reproducible auditability.',
     'NOTE: This seal verifies integrity only. Human countersignature is required for legal conformity.',
   ]
-  let sealY = y + 25
+  let sealY = y + 34
   for (const line of sealLines) {
     sealY = checkPage(doc, sealY, 5)
     doc.text(safeStr(line), M + 5, sealY)
@@ -839,8 +959,13 @@ export async function exportAuditToPdf(result, description) {
     y += 12
   }
 
+  if (compliance.countersignatures?.length) {
+    const recorded = compliance.countersignatures.map(cs => `${cs.role || 'Role'} — ${cs.name || 'Pending name'}${cs.signed_at ? ` on ${cs.signed_at}` : ''}`)
+    y = textBlock(doc, `Recorded countersignatures: ${recorded.join('; ')}`, M, y, { color: C.muted, maxW: CW, fontSize: 8 })
+  }
+
   y += 4
-  y = textBlock(doc, `Methodology: ${METHODOLOGY_VERSION}  |  Integrity Hash: ${vHash}  |  Generated: ${ts}  |  Geographic scope of deployment must be separately documented per Art. 2 of Regulation (EU) 2024/1689.`, M, y, { color: C.muted, maxW: CW, fontSize: 7.5, lineHeight: 1.4 })
+  y = textBlock(doc, `Methodology: ${METHODOLOGY_VERSION}  |  Integrity Hash (export): ${exportHash}  |  Generated: ${ts}  |  Geographic scope of deployment must be separately documented per Art. 2 of Regulation (EU) 2024/1689.`, M, y, { color: C.muted, maxW: CW, fontSize: 7.5, lineHeight: 1.4 })
 
   pageFooter(doc)
   doc.save(`FairLens_Compliance_Audit_${Date.now()}.pdf`)
