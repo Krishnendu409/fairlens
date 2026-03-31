@@ -3,6 +3,7 @@ audit_route.py — audit endpoints + compliance record persistence
 """
 
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, get_args, get_origin
 
@@ -32,13 +33,7 @@ HUMAN_APPROVAL_FIELDS = {
     "oversight_description",
     "annex_confirmation",
 }
-AUTO_GENERATED_MARKERS = {
-    "auto_computed",
-    "auto-generated",
-    "auto_generated",
-    "inferred",
-    "estimated",
-}
+AUTO_GENERATED_PLACEHOLDER_REGEX = re.compile(r"^(auto[\s-_]?computed|auto[\s-_]?generated|inferred|estimated)$", re.IGNORECASE)
 
 
 def _iso_now() -> str:
@@ -155,7 +150,7 @@ def _normalize_structured_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
         if _is_string_field(field.annotation):
             val = metadata.get(key)
             normalized = str(val).strip() if val is not None and str(val).strip() else "NOT PROVIDED"
-            if key in HUMAN_APPROVAL_FIELDS and normalized.lower() in AUTO_GENERATED_MARKERS:
+            if key in HUMAN_APPROVAL_FIELDS and AUTO_GENERATED_PLACEHOLDER_REGEX.match(normalized):
                 normalized = "NOT PROVIDED"
             metadata[key] = normalized
 

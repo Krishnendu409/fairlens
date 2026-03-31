@@ -29,6 +29,7 @@ const METHODOLOGY_VERSION = 'FL-2026.03-v3.0'
 const METHODOLOGY_HASH = 'b7a4f3e2c1d09f8e'
 const MAX_TABLE_CELL_CHARS = 1200
 const MAX_TABLE_CELL_LINES = 14
+const AUTO_GENERATED_PLACEHOLDER_REGEX = /^(auto[\s-_]?computed|auto[\s-_]?generated|inferred|estimated)$/i
 const HUMAN_APPROVAL_FIELDS = new Set([
   'lawful_basis',
   'decision_maker',
@@ -138,7 +139,7 @@ function normalizeCompliance(meta) {
   const requiredStrings = Object.keys(base).filter(k => typeof base[k] === 'string')
   for (const key of requiredStrings) {
     if (!merged[key] || !String(merged[key]).trim()) merged[key] = 'NOT PROVIDED'
-    if (HUMAN_APPROVAL_FIELDS.has(key) && /^(auto[\s-_]?computed|auto[\s-_]?generated|inferred|estimated)$/i.test(String(merged[key]).trim())) {
+    if (HUMAN_APPROVAL_FIELDS.has(key) && AUTO_GENERATED_PLACEHOLDER_REGEX.test(String(merged[key]).trim())) {
       merged[key] = 'NOT PROVIDED'
     }
   }
