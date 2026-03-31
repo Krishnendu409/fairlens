@@ -400,8 +400,8 @@ Formula: mean({[round(v*100,1) for v in violations]}) = {bias_score}"""
             "has_predictions": has_predictions,
             "dpd":            dpd,
             "dir_":           dir_,
-            "tpr_gap":        tpr_gap if tpr_gap is not None else 0.0,
-            "fpr_gap":        fpr_gap if fpr_gap is not None else 0.0,
+            "tpr_gap":        tpr_gap,
+            "fpr_gap":        fpr_gap,
             "avg_gap":        avg_gap,
             "theil":          theil,
             "score_breakdown": score_breakdown,
@@ -738,7 +738,9 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
         ))
 
     valid_results = [r for r in results if r.final_score >= 0]
-    best = max(valid_results, key=lambda x: x.final_score) if valid_results            else min(results, key=lambda x: x.bias_score)
+    best = (max(valid_results, key=lambda x: x.final_score)
+            if valid_results
+            else min(results, key=lambda x: x.bias_score))
 
     bias_after  = best.bias_score
     acc_after   = best.accuracy
@@ -1149,8 +1151,8 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
 
     try:
         return merge_into_response(
-        stats, ai, root_causes, bias_origin_dict,
-        mitigation, stat_test, reliability_dict
+            stats, ai, root_causes, bias_origin_dict,
+            mitigation, stat_test, reliability_dict,
         )
     except Exception as merge_err:
         raise RuntimeError(f"Response assembly failed: {merge_err}\n{traceback.format_exc()}")
