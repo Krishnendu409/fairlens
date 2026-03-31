@@ -1,0 +1,149 @@
+/* ── Google Fonts ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+/* ── Klijamef font (approximate via variable font stack) ── */
+@font-face {
+  font-family: 'Klijamef';
+  src: local('Futura'), local('Century Gothic'), local('Trebuchet MS');
+  font-weight: normal;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── DARK MODE (default) ── */
+:root,
+[data-theme="dark"] {
+  --bg:           #1a1a1a;
+  --bg2:          #222222;
+  --surface:      #2a2a2a;
+  --surface2:     #333333;
+  --border:       #404040;
+  --border-light: #505050;
+
+  --text:         #f5f0e8;
+  --text-muted:   #a09080;
+  --text-faint:   #706050;
+
+  --primary:      #e8720c;
+  --primary-dark: #c45e08;
+  --primary-light:#f5a44a;
+  --primary-glow: rgba(232,114,12,0.2);
+
+  --accent:       #d4960a;
+  --accent-light: #f0b420;
+
+  --grad:         linear-gradient(135deg, #e8720c, #d4960a);
+  --grad-hover:   linear-gradient(135deg, #f5a44a, #f0b420);
+  --grad-subtle:  linear-gradient(135deg, rgba(232,114,12,0.15), rgba(212,150,10,0.15));
+
+  --green:        #4ade80;
+  --amber:        #fbbf24;
+  --red:          #f87171;
+
+  --shadow:       0 4px 24px rgba(0,0,0,0.4);
+  --shadow-sm:    0 2px 8px rgba(0,0,0,0.3);
+  --shadow-glow:  0 4px 20px rgba(232,114,12,0.25);
+
+  --radius:       16px;
+  --radius-sm:    10px;
+  --radius-xs:    6px;
+  --radius-full:  999px;
+
+  --font:         'Inter', 'Century Gothic', 'Futura', sans-serif;
+  --font-display: 'Century Gothic', 'Futura', 'Trebuchet MS', 'Inter', sans-serif;
+}
+
+/* ── LIGHT MODE ── */
+[data-theme="light"] {
+  --bg:           #faf7f2;
+  --bg2:          #f5f0e8;
+  --surface:      #ffffff;
+  --surface2:     #f0ebe0;
+  --border:       #e0d8c8;
+  --border-light: #d0c8b8;
+
+  --text:         #2a1f10;
+  --text-muted:   #7a6040;
+  --text-faint:   #b09878;
+
+  --primary:      #c45e08;
+  --primary-dark: #a04a04;
+  --primary-light:#e8720c;
+  --primary-glow: rgba(196,94,8,0.15);
+
+  --accent:       #b8800a;
+  --accent-light: #d4960a;
+
+  --grad:         linear-gradient(135deg, #c45e08, #b8800a);
+  --grad-hover:   linear-gradient(135deg, #e8720c, #d4960a);
+  --grad-subtle:  linear-gradient(135deg, rgba(196,94,8,0.1), rgba(184,128,10,0.1));
+
+  --green:        #16a34a;
+  --amber:        #d97706;
+  --red:          #dc2626;
+
+  --shadow:       0 4px 24px rgba(100,60,0,0.12);
+  --shadow-sm:    0 2px 8px rgba(100,60,0,0.08);
+  --shadow-glow:  0 4px 20px rgba(196,94,8,0.2);
+}
+
+/* ── Base ── */
+html { color-scheme: dark; }
+[data-theme="light"] { color-scheme: light; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.6;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+/* ── Typography ── */
+h1, h2, h3 {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+a { color: var(--primary); text-decoration: none; }
+a:hover { color: var(--primary-light); }
+
+button { cursor: pointer; font-family: var(--font); }
+textarea, input, select { font-family: var(--font); }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--primary); }
+
+/* ── Selection ── */
+::selection {
+  background: var(--primary-glow);
+  color: var(--primary-light);
+}
+
+/* ── Transitions ── */
+* { transition: border-color 0.2s, background-color 0.2s, color 0.2s; }
+
+/* ── Icon system ── */
+.fl-icon {
+  color: var(--primary);
+}
+[data-theme="light"] .fl-icon {
+  color: var(--primary-dark);
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.fl-icon svg { display: block; }

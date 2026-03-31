@@ -1,0 +1,9 @@
+.wrapper { display: flex; flex-direction: column; gap: 0.5rem; }
+.title { font-size: 0.85rem; font-weight: 600; color: var(--text); }
+.tooltip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.9rem;
+  font-size: 0.82rem;
+}

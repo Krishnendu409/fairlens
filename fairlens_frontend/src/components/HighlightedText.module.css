@@ -1,0 +1,20 @@
+.text {
+  font-size: 0.92rem;
+  color: var(--text);
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+
+.highlight {
+  background: rgba(248, 113, 113, 0.2);
+  color: #fca5a5;
+  border-bottom: 2px solid rgba(248, 113, 113, 0.6);
+  border-radius: 3px;
+  padding: 0 2px;
+  cursor: help;
+  transition: background 0.2s;
+}
+
+.highlight:hover {
+  background: rgba(248, 113, 113, 0.35);
+}

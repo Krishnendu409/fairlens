@@ -1,0 +1,36 @@
+.toggle {
+  display: flex;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 3px;
+  gap: 2px;
+}
+
+.btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-full);
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.btn:hover { color: var(--text); background: var(--surface); }
+
+.active {
+  background: var(--grad) !important;
+  color: #fff !important;
+  font-weight: 600;
+  box-shadow: var(--shadow-glow);
+}
+
+.icon { font-size: 0.85rem; }
+.label { display: none; }
+
+@media (min-width: 500px) { .label { display: inline; } }

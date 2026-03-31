@@ -1,0 +1,32 @@
+.wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.chartTitle {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chartDesc {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.tooltip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.9rem;
+  font-size: 0.82rem;
+}
+
+.tooltipLabel {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-bottom: 0.3rem;
+  font-weight: 600;
+}

@@ -1,0 +1,135 @@
+.modalOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modalContent {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 90%;
+  max-width: 500px;
+  overflow: hidden;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+}
+
+.modalHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+
+.modalHeader h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+}
+
+.closeBtn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.closeBtn:hover {
+  background: rgba(255,255,255,0.1);
+  color: var(--text);
+}
+
+.modalBody {
+  padding: 20px;
+}
+
+.modalBody p {
+  margin: 0 0 24px;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.badgePreview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 24px;
+}
+
+.previewLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--faint);
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.codeSection {
+  margin-bottom: 16px;
+}
+
+.codeHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.codeHeader span {
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.codeHeader button {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--primary);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.codeHeader button:hover {
+  background: var(--bg);
+  color: var(--accent);
+}
+
+.codeSection textarea {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  resize: none;
+  outline: none;
+}
+
+.codeSection textarea:focus {
+  border-color: var(--primary);
+}

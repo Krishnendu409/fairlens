@@ -1,0 +1,103 @@
+.wrapper {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 640px) { .wrapper { grid-template-columns: 1fr; } }
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-wrap: wrap;
+}
+
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%; flex-shrink: 0;
+}
+
+.hint {
+  font-size: 0.72rem; color: var(--text-muted);
+  font-weight: 400; text-transform: none;
+  letter-spacing: 0; opacity: 0.7; margin-left: auto;
+}
+
+.select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 0.75rem 2rem 0.75rem 1rem;
+  font-size: 0.92rem;
+  font-family: var(--font);
+  width: 100%;
+  transition: border-color 0.2s;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b90b8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.9rem center;
+  cursor: pointer;
+}
+
+.select:focus { outline: none; border-color: var(--accent); }
+
+/* Strategy selector */
+.strategyGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+}
+
+@media (max-width: 700px) { .strategyGrid { grid-template-columns: 1fr; } }
+
+.strategyCard {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.9rem 1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.strategyCard:hover { border-color: var(--accent); }
+
+.strategyActive {
+  border-color: var(--accent) !important;
+  background: rgba(79,142,247,0.06);
+}
+
+.strategyHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.strategyRadio {
+  color: var(--accent);
+  font-size: 0.9rem;
+}
+
+.strategyHeader strong {
+  font-size: 0.88rem;
+  color: var(--text);
+}
+
+.strategyDesc {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}

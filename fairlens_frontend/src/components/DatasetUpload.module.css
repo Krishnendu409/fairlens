@@ -1,0 +1,73 @@
+.dropzone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 2rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: var(--bg);
+  text-align: center;
+}
+
+.dropzone:hover, .dragOver {
+  border-color: var(--accent);
+  background: rgba(79, 142, 247, 0.04);
+}
+
+.hasFile {
+  border-color: var(--green);
+  border-style: solid;
+  background: rgba(52, 211, 153, 0.04);
+}
+
+.hidden { display: none; }
+
+.placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.uploadIcon {
+  font-size: 2rem;
+  opacity: 0.5;
+}
+
+.uploadTitle {
+  font-size: 0.95rem;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.uploadHint {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.fileInfo {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  text-align: left;
+}
+
+.fileIcon { font-size: 2rem; }
+
+.fileName {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.fileMeta {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 0.2rem;
+}
+
+.checkmark {
+  margin-left: auto;
+  color: var(--green);
+  font-size: 1.3rem;
+  font-weight: 700;
+}

@@ -1,0 +1,83 @@
+.wrapper { width: 100%; }
+
+.tableWrapper { width: 100%; overflow-x: auto; }
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.83rem;
+}
+
+.table th {
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 0.75rem 0.75rem;
+  border-bottom: 1px solid rgba(46,51,80,0.4);
+  vertical-align: middle;
+}
+
+.table tr:last-child td { border-bottom: none; }
+.table tr:hover td { background: var(--surface2); }
+
+.metricName {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 0.15rem;
+}
+
+.metricDesc {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.threshold {
+  color: var(--text-muted);
+  font-family: 'Courier New', monospace;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.value {
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+
+.valueBad { color: var(--red); }
+.valueGood { color: var(--green); }
+
+.badge {
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badgeBad {
+  background: rgba(248,113,113,0.15);
+  color: var(--red);
+}
+
+.badgeGood {
+  background: rgba(52,211,153,0.15);
+  color: var(--green);
+}
+
+.improvement {
+  color: var(--green);
+  font-size: 0.9rem;
+  margin-left: 4px;
+}
