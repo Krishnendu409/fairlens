@@ -7,6 +7,9 @@ FastAPI backend for AI bias detection. Calls Google Gemini 1.5 Pro.
 ```bash
 pip install -r requirements.txt
 cp .env.example .env        # add your GEMINI_API_KEY
+# Optional if you route through a proxy with a different TLS host:
+# GEMINI_BASE_URL=https://your-proxy.example.com/v1beta/models
+# GEMINI_API_URL=https://your-proxy.example.com/v1beta/models/gemini-2.5-flash:generateContent
 uvicorn main:app --reload
 ```
 

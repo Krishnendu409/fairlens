@@ -29,7 +29,7 @@ LABEL-ONLY MODE:
   Showing 0.0000 for unmeasured metrics is misleading — they are None.
 """
 
-import os, json, re, base64, io
+import os, json, re, base64, io, ssl
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -68,11 +68,43 @@ def _safe_json(obj) -> str:
     return json.dumps(obj, cls=_Enc)
 
 
+def _build_gemini_url() -> str:
+    """
+    Gemini endpoint is configurable to avoid TLS hostname issues when traffic is
+    routed through a proxy. Prefer full override via GEMINI_API_URL; fallback to
+    GEMINI_BASE_URL + GEMINI_MODEL.
+    """
+    override = os.getenv("GEMINI_API_URL")
+    if override:
+        return override
+
+    base = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/models/")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    base = base.rstrip("/")
+
+    # If caller already provided the full path (including :generateContent) keep it.
+    if base.endswith(":generateContent"):
+        return base
+
+    return f"{base}/{model}:generateContent"
+
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash:generateContent"
-)
+GEMINI_URL = _build_gemini_url()
+
+
+def _unwrap_ssl_error(exc: Exception) -> Optional[ssl.SSLCertVerificationError]:
+    """
+    Walk the exception chain to detect SSL cert verification failures.
+    """
+    seen = set()
+    cur = exc
+    while cur and id(cur) not in seen:
+        if isinstance(cur, ssl.SSLCertVerificationError):
+            return cur
+        seen.add(id(cur))
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1147,12 +1179,21 @@ def merge_into_response(stats, ai, root_causes, bias_origin_dict,
 
 async def call_gemini(prompt: str) -> dict:
     if not GEMINI_API_KEY: raise RuntimeError("GEMINI_API_KEY not configured")
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(
-            GEMINI_URL, params={"key": GEMINI_API_KEY},
-            json={"contents": [{"parts": [{"text": prompt}]}],
-                  "generationConfig": {"temperature": 0.0, "maxOutputTokens": 6000}},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                GEMINI_URL, params={"key": GEMINI_API_KEY},
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "generationConfig": {"temperature": 0.0, "maxOutputTokens": 6000}},
+            )
+    except httpx.TransportError as exc:
+        ssl_err = _unwrap_ssl_error(exc)
+        if ssl_err:
+            raise RuntimeError(
+                "Gemini TLS verification failed. If traffic goes through a proxy, set "
+                "GEMINI_API_URL or GEMINI_BASE_URL to a host whose certificate matches."
+            ) from ssl_err
+        raise
     if resp.status_code != 200:
         raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:400]}")
     cands = resp.json().get("candidates", [])
@@ -1187,12 +1228,21 @@ async def run_chat(request: ChatRequest) -> ChatResponse:
         f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}\n\n"
         for m in request.conversation
     )
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            GEMINI_URL, params={"key": GEMINI_API_KEY},
-            json={"contents": [{"parts": [{"text": f"{ctx}\n\n{hist}User: {request.message}\n\nAssistant:"}]}],
-                  "generationConfig": {"temperature": 0.3, "maxOutputTokens": 800}},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                GEMINI_URL, params={"key": GEMINI_API_KEY},
+                json={"contents": [{"parts": [{"text": f"{ctx}\n\n{hist}User: {request.message}\n\nAssistant:"}]}],
+                      "generationConfig": {"temperature": 0.3, "maxOutputTokens": 800}},
+            )
+    except httpx.TransportError as exc:
+        ssl_err = _unwrap_ssl_error(exc)
+        if ssl_err:
+            raise RuntimeError(
+                "Gemini TLS verification failed. Set GEMINI_API_URL or GEMINI_BASE_URL "
+                "to a reachable host whose certificate matches."
+            ) from ssl_err
+        raise
     resp.raise_for_status()
     chat_resp  = resp.json()
     chat_cands = chat_resp.get("candidates", [])
