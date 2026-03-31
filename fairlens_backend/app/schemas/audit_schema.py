@@ -1,5 +1,14 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Dict, List, Any, Optional
+
+# ── Validation roles (fixed) ───────────────────────────────────────────────────
+VALIDATION_ROLES = [
+    "System Owner / Deployer",
+    "Compliance Officer",
+    "Data Protection Officer (DPO)",
+    "Technical Lead / Model Developer",
+]
+TECHNICAL_LEAD_ROLE = "Technical Lead / Model Developer"
 
 
 # ── Request ──────────────────────────────────────────────────────────────────
@@ -152,3 +161,43 @@ class AuditResponse(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+
+
+# ── Compliance metadata persistence ────────────────────────────────────────────
+
+
+class ComplianceMetadata(BaseModel):
+    lawful_basis: Optional[str] = None
+    dpia_status: Optional[str] = None
+    dpia_link: Optional[str] = None
+    dpo_contact: Optional[str] = None
+    oversight_contact: Optional[str] = None
+    nca_jurisdiction: Optional[str] = None
+    monitoring_cadence: Optional[str] = None
+    escalation_plan: Optional[str] = None
+    annex_confirmation: Optional[str] = None
+    countersignatures: List[Dict[str, Any]] = Field(default_factory=list)
+    robustness_validation: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ComplianceRecord(BaseModel):
+    record_id: str
+    record_version: int
+    deployment_locked: bool = False
+    created_at: str
+    updated_at: str
+    integrity_hash: str
+    export_integrity_hash: Optional[str] = None
+    audit_result: Dict[str, Any]
+    compliance_metadata: ComplianceMetadata
+
+
+class ComplianceRecordRequest(BaseModel):
+    record_id: Optional[str] = None
+    deployment_locked: Optional[bool] = None
+    audit_result: Dict[str, Any]
+    compliance_metadata: Optional[ComplianceMetadata] = None
+
+
+class ComplianceRecordResponse(ComplianceRecord):
+    hash_valid: bool
