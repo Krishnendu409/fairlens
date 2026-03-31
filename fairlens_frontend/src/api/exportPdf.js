@@ -62,6 +62,29 @@ function generateVerificationHash(str) {
   return 'SHAx' + Math.abs(hash).toString(16).padStart(12, '0').toUpperCase()
 }
 
+// Returns false when description looks like a placeholder / keyboard-mash
+function isValidDescription(str) {
+  if (!str || str.trim().length < 5) return false
+  const s = str.trim()
+  const letters = (s.match(/[a-z]/gi) || []).length
+  if (letters < 8) return true // too short to judge reliably
+  const vowels = (s.match(/[aeiou]/gi) || []).length
+  if (vowels / letters < 0.08) return false          // almost no vowels
+  if (/[bcdfghjklmnpqrstvwxyz]{7,}/i.test(s)) return false // 7+ consecutive consonants
+  return true
+}
+
+// Infers deployment domain from column names + target/sensitive column
+function detectDomain(columns, targetCol, sensitiveCol) {
+  const all = [...(columns || []), targetCol || '', sensitiveCol || ''].join(' ').toLowerCase()
+  if (/\b(hir|employ|job|salary|recruit|worker|position|applicant)\b/.test(all)) return 'employment'
+  if (/\b(mark|grade|score|pass|fail|exam|school|subject|student|course|educat)\b/.test(all)) return 'education'
+  if (/\b(loan|credit|bank|financ|mortgage|debt)\b/.test(all)) return 'credit'
+  if (/\b(health|medical|patient|diagnos|hospital|clinic|drug)\b/.test(all)) return 'healthcare'
+  if (/\b(tenant|rent|housing|home|evict)\b/.test(all)) return 'housing'
+  return 'general'
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function checkPage(doc, y, needed) {
   if (y + needed > PH - FOOTER_H - 15) {
@@ -305,7 +328,24 @@ export async function exportAuditToPdf(result, description) {
   
   const scopeText = `DATASET METADATA & EU COMPLIANCE SCOPE:\nThis dataset involves ${result.total_rows?.toLocaleString() ?? 'several'} records evaluating the decision outcome of "${result.target_column}". The attribute "${result.sensitive_column}" is legally protected against algorithmic discrimination. The objective of this audit is to guarantee that the system's outcomes for "${result.target_column}" are structurally fair across all groups associated with "${result.sensitive_column}".`
   cy = textBlock(doc, scopeText, M + 4, cy + 6, { maxW: CW - 8, color: C.muted, fontSize: 8.5, lineHeight: 1.6 })
-  
+
+  // ── Dataset identifier validation warning (Art. 11) ────────────────────────
+  if (!isValidDescription(description)) {
+    cy += 4
+    doc.setFillColor(254, 235, 235)
+    doc.setDrawColor(...C.red); doc.setLineWidth(0.5)
+    doc.roundedRect(M, cy, CW, 18, 1, 1, 'FD')
+    doc.setFontSize(8.5); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.red)
+    doc.text('CRITICAL: INVALID DATASET IDENTIFIER (Art. 11)', M + 4, cy + 6)
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...C.text)
+    const warnLines = doc.splitTextToSize(
+      'The dataset description appears to contain a placeholder or nonsensical string. Article 11 requires unambiguous dataset identification including provenance, collection methodology, and version. This defect alone is sufficient to invalidate this document in a formal NCA proceeding.',
+      CW - 8
+    )
+    doc.text(warnLines, M + 4, cy + 11)
+    cy += Math.max(18, warnLines.length * 4 + 12)
+  }
+
   cy += 8
   cy = drawRiskGauge(doc, result.bias_score ?? 0, euRisk, cy)
 
@@ -459,36 +499,348 @@ export async function exportAuditToPdf(result, description) {
     y += 10
   }
 
-  // Automated Compliance Sign-Off
-  y = checkPage(doc, y, 60)
-  y = drawSectionHeader(doc, '4. Declaration of System Conformity', y)
-  
+  // ── Implementation Roadmap Requirement (Art. 9) ─────────────────────────────
+  y = checkPage(doc, y, 32)
+  y = subHeading(doc, 'Implementation Roadmap Requirement (Art. 9)', y)
+  doc.setFillColor(...C.surface2)
+  doc.setDrawColor(...C.amber); doc.setLineWidth(0.4)
+  doc.roundedRect(M, y, CW, 20, 1, 1, 'FD')
+  doc.setFontSize(8.5); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.amber)
+  doc.text('ACTION REQUIRED BEFORE DEPLOYMENT', M + 4, y + 6)
+  doc.setFont('helvetica', 'normal'); doc.setTextColor(...C.text)
+  y = textBlock(doc, 'Simulated strategies above are theoretical. Under Article 9, identified risks must be actively managed — not merely modelled. For the recommended strategy the operator must document: (1) A named responsible person, (2) An implementation timeline with milestones, (3) A validation dataset and re-audit trigger, (4) A rollback procedure if bias escalates post-deployment.', M + 4, y + 10, { maxW: CW - 8, fontSize: 8.5, color: C.text })
+  y += 8
+
+  // ── Section 4: Annex III High-Risk Classification Assessment (Art. 6) ────────
+  y = checkPage(doc, y, 20)
+  y = drawSectionHeader(doc, '4. Annex III Classification Assessment (Art. 6)', y)
+
+  const domain = detectDomain(result.columns, result.target_column, result.sensitive_column)
+  const domainLabels = {
+    employment: 'Employment & Worker Management',
+    education:  'Education & Vocational Training',
+    credit:     'Access to Financial Services',
+    healthcare: 'Healthcare',
+    housing:    'Housing & Real Estate',
+    general:    'General / Unclassified — Operator Review Required',
+  }
+  y = textBlock(doc, 'Under Article 6 and Annex III of Regulation (EU) 2024/1689, AI systems used in certain domains are classified as high-risk and require conformity assessment before deployment. This section documents the formal Annex III mapping. The system operator must confirm or correct this auto-classification and record the outcome in the technical file.', M, y, { color: C.muted, mb: 8, lineHeight: 1.5 })
+
+  y = subHeading(doc, 'Detected Deployment Domain', y)
+  y = dataRow(doc, 'AUTO-DETECTED DOMAIN', domainLabels[domain], y, domain === 'general' ? C.amber : C.red)
+  y = dataRow(doc, 'TARGET COLUMN', result.target_column || 'Not specified', y)
+  y = dataRow(doc, 'SENSITIVE ATTRIBUTE', result.sensitive_column || 'Not specified', y)
+  y += 4
+
+  y = subHeading(doc, 'Annex III Category Mapping', y)
+  const annexRows = [
+    [
+      { text: 'Art. 8(1)(c) — Education / vocational training', bold: true },
+      { text: domain === 'education' ? 'LIKELY APPLICABLE' : 'REVIEW REQUIRED', color: domain === 'education' ? C.red : C.amber },
+      { text: domain === 'education' ? 'Dataset features indicate educational context' : 'Operator must confirm scope' },
+    ],
+    [
+      { text: 'Art. 8(1)(d) — Employment / worker management', bold: true },
+      { text: domain === 'employment' ? 'LIKELY APPLICABLE' : 'REVIEW REQUIRED', color: domain === 'employment' ? C.red : C.amber },
+      { text: domain === 'employment' ? 'Selection decisions indicate employment context' : 'Operator must confirm scope' },
+    ],
+    [
+      { text: 'Art. 8(1)(e) — Essential private/public services', bold: true },
+      { text: (domain === 'credit' || domain === 'housing') ? 'LIKELY APPLICABLE' : 'REVIEW REQUIRED', color: (domain === 'credit' || domain === 'housing') ? C.red : C.amber },
+      { text: 'Credit, housing, and public benefit access' },
+    ],
+    [
+      { text: 'Art. 8(1)(b) — Critical infrastructure', bold: true },
+      { text: 'NOT DETECTED', color: C.green },
+      { text: 'Operator must confirm if applicable' },
+    ],
+    [
+      { text: 'Art. 8(1)(f-h) — Law enforcement / migration / justice', bold: true },
+      { text: 'NOT DETECTED', color: C.green },
+      { text: 'Operator must confirm if applicable' },
+    ],
+  ]
+  y = drawGridTable(doc, ['Annex III Category', 'Status', 'Notes'], annexRows, y, [78, 40, 52])
+  y += 4
+
+  doc.setFillColor(...C.surface2)
+  doc.setDrawColor(...C.amber); doc.setLineWidth(0.5)
+  doc.roundedRect(M, y, CW, 14, 1, 1, 'FD')
+  doc.setFontSize(8.5); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.amber)
+  doc.text('OPERATOR ACTION REQUIRED', M + 4, y + 5.5)
+  doc.setFont('helvetica', 'normal'); doc.setTextColor(...C.text)
+  y = textBlock(doc, 'Formally confirm Annex III classification and document outcome in the technical file. If classified as high-risk, a full Article 9 risk management system and Article 43 conformity assessment are mandatory before deployment.', M + 4, y + 9.5, { maxW: CW - 8, fontSize: 8.5, color: C.text })
+  y += 6
+
+  // ── Section 5: Risk Management System (Art. 9) ───────────────────────────────
+  y = checkPage(doc, y, 20)
+  y = drawSectionHeader(doc, '5. Risk Management System (Art. 9)', y)
+
+  y = textBlock(doc, 'Article 9 requires high-risk AI systems to maintain a continuous risk management system throughout their full lifecycle. The risk register below identifies known risks, their severity, and current mitigation status based on this audit\'s findings.', M, y, { color: C.muted, mb: 8, lineHeight: 1.5 })
+
+  y = subHeading(doc, 'Risk Register', y)
+  const riskScore = result.bias_score ?? 0
+  const riskRegisterRows = [
+    [
+      { text: 'Demographic bias in selection outcomes', bold: true },
+      { text: 'CRITICAL', color: C.red, bold: true },
+      { text: 'HIGH', color: C.red },
+      { text: riskScore >= 70 ? 'UNMITIGATED - Score ' + riskScore + '/100' : 'PARTIAL - Simulations only' },
+    ],
+    [
+      { text: 'Proxy discrimination via correlated variables', bold: true },
+      { text: 'HIGH', color: C.red },
+      { text: 'HIGH', color: C.red },
+      { text: 'OPEN - Intersectional analysis absent' },
+    ],
+    [
+      { text: 'Automated decisions without human review (Art. 14)', bold: true },
+      { text: 'HIGH', color: C.red },
+      { text: 'HIGH', color: C.red },
+      { text: 'OPEN - Human oversight not documented' },
+    ],
+    [
+      { text: 'Data drift causing bias escalation over time', bold: true },
+      { text: 'MEDIUM', color: C.amber },
+      { text: 'HIGH', color: C.red },
+      { text: 'OPEN - No monitoring plan documented' },
+    ],
+    [
+      { text: 'No explainability undermining contestation rights', bold: true },
+      { text: 'HIGH', color: C.red },
+      { text: 'MEDIUM', color: C.amber },
+      { text: 'OPEN - No explainability layer' },
+    ],
+  ]
+  y = drawGridTable(doc, ['Risk', 'Likelihood', 'Impact', 'Current Status'], riskRegisterRows, y, [66, 22, 18, 64])
+  y += 6
+
+  y = subHeading(doc, 'Proxy Variable & Intersectionality Analysis', y)
+  const allCols = result.columns || []
+  const otherCols = allCols.filter(c => c !== result.sensitive_column && c !== result.target_column)
+  y = textBlock(doc, `This audit examined only "${result.sensitive_column || 'the sensitive attribute'}" as the protected attribute. The columns below must be assessed for proxy correlation with protected characteristics under Article 10(5) and EU Charter Article 21 before any deployment.`, M, y, { color: C.muted, mb: 6, lineHeight: 1.5 })
+  if (otherCols.length > 0) {
+    const proxyRows = otherCols.map(c => [
+      { text: c, bold: true },
+      { text: 'ANALYSIS REQUIRED', color: C.amber },
+      { text: 'Correlation with protected char. — analyst review needed' },
+    ])
+    y = drawGridTable(doc, ['Column', 'Proxy Risk', 'Required Action'], proxyRows, y, [50, 40, 80])
+  } else {
+    y = textBlock(doc, 'No additional columns available for proxy analysis.', M, y, { color: C.muted })
+  }
+  y += 4
+
+  // ── Section 6: Transparency & Explainability (Art. 13) ──────────────────────
+  y = checkPage(doc, y, 20)
+  y = drawSectionHeader(doc, '6. Transparency & Explainability (Art. 13)', y)
+
+  y = textBlock(doc, 'Article 13 requires high-risk AI systems to be sufficiently transparent so users can interpret outputs appropriately. GDPR Article 22 additionally grants individuals the right to a meaningful explanation of solely automated decisions that significantly affect them.', M, y, { color: C.muted, mb: 8, lineHeight: 1.5 })
+
+  y = subHeading(doc, 'Feature Inventory & Explainability Requirements', y)
+  y = textBlock(doc, `The columns below constitute the dataset feature space. Each feature\'s contribution to the "${result.target_column || 'decision outcome'}" must be documented via an explainability method (e.g. SHAP, LIME) before deployment.`, M, y, { color: C.muted, mb: 6, lineHeight: 1.5 })
+  if (allCols.length > 0) {
+    const featureRows = allCols.map(c => {
+      const isSens = c === result.sensitive_column
+      const isTgt  = c === result.target_column
+      return [
+        { text: c, bold: isSens || isTgt },
+        { text: isSens ? 'PROTECTED ATTRIBUTE' : isTgt ? 'TARGET (OUTPUT)' : 'INPUT FEATURE', color: isSens ? C.red : isTgt ? C.amber : C.text },
+        { text: isSens ? 'Monitor; direct use may constitute discrimination' : isTgt ? 'Audit for disparate impact across groups' : 'SHAP/LIME contribution analysis required' },
+      ]
+    })
+    y = drawGridTable(doc, ['Column', 'Role', 'Explainability Requirement'], featureRows, y, [40, 42, 88])
+  }
+  y += 4
+
+  y = subHeading(doc, 'Explainability Compliance Checklist', y)
+  const explainRows = [
+    [{ text: 'Model architecture documented (Art. 11(1)(d))' }, { text: 'REQUIRED', color: C.red }, { text: 'Document model type, training method, hyperparams' }],
+    [{ text: 'Feature importance analysis (SHAP / LIME or equivalent)' }, { text: 'REQUIRED', color: C.red }, { text: 'Implement and document before deployment' }],
+    [{ text: 'Per-group decision explanation on request' }, { text: 'REQUIRED', color: C.red }, { text: 'Must be producible on demand (GDPR Art. 22)' }],
+    [{ text: 'Plain-language transparency notice for affected persons' }, { text: 'REQUIRED', color: C.red }, { text: 'Draft Art. 13 notice: AI role, factors, rights' }],
+    [{ text: 'Contestation / human review mechanism documented' }, { text: 'REQUIRED', color: C.red }, { text: 'Contact point, escalation path, response SLA' }],
+  ]
+  y = drawGridTable(doc, ['Requirement', 'Status', 'Action'], explainRows, y, [80, 25, 65])
+  y += 4
+
+  // ── Section 7: Accuracy & Robustness Assessment (Art. 15) ───────────────────
+  y = checkPage(doc, y, 20)
+  y = drawSectionHeader(doc, '7. Accuracy & Robustness Assessment (Art. 15)', y)
+
+  y = textBlock(doc, 'Article 15 requires high-risk AI systems to achieve appropriate levels of accuracy and robustness. Critically, disparate error rates across demographic groups are legally as significant as disparate selection rates. Per-group outcome data is derived from audit statistics below.', M, y, { color: C.muted, mb: 8, lineHeight: 1.5 })
+
+  const gStatsFull = result.group_stats || []
+  if (gStatsFull.length > 0) {
+    y = subHeading(doc, 'Per-Group Outcome Rate Analysis', y)
+    const bestRate = Math.max(...gStatsFull.map(g => g.pass_rate || 0))
+    const accRows = gStatsFull.map(g => {
+      const dir = bestRate > 0 ? (g.pass_rate || 0) / bestRate : 1.0
+      const flagged = dir < 0.80
+      return [
+        { text: String(g.group), bold: true },
+        { text: (g.count ?? 0).toLocaleString() },
+        { text: `${((g.pass_rate || 0) * 100).toFixed(1)}%`, color: flagged ? C.red : C.green },
+        { text: dir.toFixed(4), color: flagged ? C.red : C.green },
+        { text: (g.pass_count ?? 0).toLocaleString(), color: C.green },
+        { text: (g.fail_count ?? 0).toLocaleString(), color: C.red },
+        { text: flagged ? 'FAIL' : 'PASS', color: flagged ? C.red : C.green, bold: true },
+      ]
+    })
+    y = drawGridTable(doc, ['Group', 'n', 'Select. Rate', 'DIR vs. Best', 'Selected', 'Rejected', 'Status'], accRows, y, [45, 18, 25, 27, 20, 20, 15])
+    y += 4
+  }
+
+  y = subHeading(doc, 'Robustness & Accuracy Checklist', y)
+  const robustRows = [
+    [{ text: 'Confusion matrix per group (TP / TN / FP / FN)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Compute vs. ground truth before deployment' }],
+    [{ text: 'Precision / Recall / F1 breakdown by group' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Required for equalized odds assessment' }],
+    [{ text: 'Out-of-distribution (OOD) performance testing' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Test model outside training distribution' }],
+    [{ text: 'Adversarial robustness assessment' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Assess adversarial and edge-case inputs' }],
+    [{ text: 'Cybersecurity vulnerability assessment' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Data poisoning / model extraction / inference' }],
+    [{ text: 'Model version & change management log (Art. 11(1)(j))' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Retain versioned technical file 10 years' }],
+  ]
+  y = drawGridTable(doc, ['Requirement', 'Status', 'Action Required'], robustRows, y, [80, 32, 58])
+  y += 4
+
+  // ── Section 8: Data Protection & GDPR Compliance ────────────────────────────
+  y = checkPage(doc, y, 20)
+  y = drawSectionHeader(doc, '8. Data Protection & GDPR Compliance', y)
+
+  y = textBlock(doc, 'Processing personal data linked to a protected characteristic to make selection decisions likely triggers a mandatory Data Protection Impact Assessment (DPIA) under GDPR Article 35. The checklist below documents outstanding GDPR obligations that must be resolved before deployment.', M, y, { color: C.muted, mb: 8, lineHeight: 1.5 })
+
+  y = subHeading(doc, 'DPIA Trigger Assessment (GDPR Art. 35)', y)
+  const hasSensitiveCol = !!result.sensitive_column
+  const largeDataset = (result.total_rows ?? 0) > 1000
+  const dpiaRows = [
+    [
+      { text: 'Systematic processing linked to protected characteristic' },
+      { text: hasSensitiveCol ? 'TRIGGERED' : 'REVIEW REQUIRED', color: hasSensitiveCol ? C.red : C.amber, bold: true },
+      { text: `Processing "${result.sensitive_column || 'attribute'}" for automated selection` },
+    ],
+    [
+      { text: 'Automated decision with significant effect (Art. 22)' },
+      { text: 'TRIGGERED', color: C.red, bold: true },
+      { text: 'Automated selection qualifies under GDPR Art. 22' },
+    ],
+    [
+      { text: 'Large-scale processing of personal data' },
+      { text: largeDataset ? 'TRIGGERED' : 'REVIEW REQUIRED', color: largeDataset ? C.red : C.amber },
+      { text: `${(result.total_rows ?? 0).toLocaleString()} records processed in this audit` },
+    ],
+    [
+      { text: 'DPIA conducted and documented' },
+      { text: 'NOT COMPLETED', color: C.red },
+      { text: 'CRITICAL: Conduct DPIA; involve DPO before deployment' },
+    ],
+  ]
+  y = drawGridTable(doc, ['DPIA Criterion', 'Status', 'Notes'], dpiaRows, y, [80, 30, 60])
+  y += 4
+
+  y = subHeading(doc, 'GDPR Obligations Checklist (Arts. 6, 15-22)', y)
+  const gdprRows = [
+    [{ text: 'Lawful basis for processing identified (Art. 6)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Document: consent / contract / legal obligation' }],
+    [{ text: 'Data subject access rights mechanism (Art. 15)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Process for data subject access requests' }],
+    [{ text: 'Right to erasure / deletion (Art. 17)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Define deletion schedule and request handling' }],
+    [{ text: 'Right to object to automated processing (Art. 21)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Contact point and response SLA for objections' }],
+    [{ text: 'Right to human review of automated decision (Art. 22)' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Named human reviewer and escalation path' }],
+    [{ text: 'Data retention and deletion schedule (Art. 5(1)(e))' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Define retention period; delete when no longer needed' }],
+    [{ text: 'Third-party data processor agreements (Art. 28)' }, { text: 'NOT DOCUMENTED', color: C.amber }, { text: 'DPA required if AI model hosted externally' }],
+    [{ text: 'DPO sign-off on DPIA' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Formal DPO review required when DPIA is triggered' }],
+  ]
+  y = drawGridTable(doc, ['GDPR Obligation', 'Status', 'Action Required'], gdprRows, y, [80, 30, 60])
+  y += 4
+
+  // ── Section 9: Post-Market Monitoring & Incident Reporting (Arts. 72-73) ────
+  y = checkPage(doc, y, 20)
+  y = drawSectionHeader(doc, '9. Post-Market Monitoring & Incident Reporting (Arts. 72-73)', y)
+
+  y = textBlock(doc, 'Article 72 requires providers of high-risk AI systems to establish and document a post-market monitoring system. Article 73 requires serious incidents to be reported to National Competent Authorities (NCAs). The monitoring plan template below must be completed by the system operator before deployment.', M, y, { color: C.muted, mb: 8, lineHeight: 1.5 })
+
+  y = subHeading(doc, 'Monitoring Plan Template (Art. 72)', y)
+  const currentDpd = result.metrics?.find(m => m.key === 'demographic_parity_difference')?.value ?? 0
+  const monitorRows = [
+    [{ text: 'Periodic bias re-audit cadence' }, { text: 'DEFINE', color: C.amber }, { text: 'Recommended: quarterly, or per 10% dataset update' }],
+    [{ text: 'DPD drift alert threshold' }, { text: 'DEFINE', color: C.amber }, { text: `Alert if DPD exceeds ${(currentDpd * 1.2 || 0.12).toFixed(3)} (20% above current)` }],
+    [{ text: 'DIR drift alert threshold' }, { text: 'DEFINE', color: C.amber }, { text: 'Alert if DIR < 0.80 (EU threshold) or 10% below current' }],
+    [{ text: 'New protected group detection protocol' }, { text: 'DEFINE', color: C.amber }, { text: 'Re-audit when new groups appear in production data' }],
+    [{ text: 'Escalation procedure when thresholds exceeded' }, { text: 'DEFINE', color: C.amber }, { text: 'Define: notification chain, timeline, actions' }],
+    [{ text: 'Technical documentation retention (Art. 18)' }, { text: 'REQUIRED', color: C.red }, { text: 'Retain technical file 10 years post-deployment' }],
+  ]
+  y = drawGridTable(doc, ['Monitoring Element', 'Status', 'Guidance'], monitorRows, y, [78, 22, 70])
+  y += 4
+
+  y = subHeading(doc, 'Serious Incident Reporting Obligations (Art. 73)', y)
+  const incidentRows = [
+    [{ text: 'Serious incident definition documented' }, { text: 'REQUIRED', color: C.red }, { text: 'Any incident causing or risking harm to individuals' }],
+    [{ text: 'Named NCA liaison for incident notifications' }, { text: 'DEFINE', color: C.amber }, { text: 'Assign person responsible for NCA reporting' }],
+    [{ text: 'Reporting timeline complied with (Art. 73(3))' }, { text: 'REQUIRED', color: C.red }, { text: 'Notify NCA within 15 days of awareness' }],
+    [{ text: 'Geographic scope and NCA jurisdiction documented' }, { text: 'NOT DOCUMENTED', color: C.red }, { text: 'Required to identify which NCA has jurisdiction' }],
+  ]
+  y = drawGridTable(doc, ['Incident Reporting Element', 'Status', 'Notes'], incidentRows, y, [78, 22, 70])
+  y += 6
+
+  // ── Section 10: Declaration of System Conformity (updated) ──────────────────
+  y = checkPage(doc, y, 80)
+  y = drawSectionHeader(doc, '10. Declaration of System Conformity', y)
+
+  // Article 14 human oversight requirement warning
+  doc.setFillColor(255, 249, 237)
+  doc.setDrawColor(...C.amber); doc.setLineWidth(0.5)
+  doc.roundedRect(M, y, CW, 18, 2, 2, 'FD')
+  doc.setFontSize(9); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.amber)
+  doc.text('ARTICLE 14 — HUMAN OVERSIGHT REQUIRED BEFORE THIS DECLARATION IS VALID', M + 5, y + 7)
+  doc.setFont('helvetica', 'normal'); doc.setTextColor(...C.text); doc.setFontSize(8.5)
+  y = textBlock(doc, 'Per Article 14 of the EU AI Act, this declaration must be reviewed, validated, and countersigned by a qualified natural person before it has legal evidentiary value. The automated integrity seal below certifies document integrity only — it does not constitute a conformity declaration.', M + 5, y + 12, { maxW: CW - 10, fontSize: 8.5, color: C.text })
+  y += 8
+
+  // Automated integrity seal (kept for document integrity verification only)
   doc.setFillColor(...C.surface)
   doc.setDrawColor(...C.border); doc.setLineWidth(0.4)
-  doc.roundedRect(M, y, CW, 50, 2, 2, 'FD')
-
+  doc.roundedRect(M, y, CW, 32, 2, 2, 'FD')
   doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.primary)
-  doc.text('SYSTEM VERIFICATION SEAL', M + 5, y + 8)
-  
+  doc.text('AUTOMATED INTEGRITY SEAL (Document Verification Only)', M + 5, y + 8)
   doc.setFontSize(8.5); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.text)
-  doc.text(`Hash: ${vHash}`, M + 5, y + 15)
+  doc.text(`Integrity Hash: ${vHash}`, M + 5, y + 15)
   doc.text(`Generated: ${ts}`, M + 5, y + 20)
-  
-  doc.setFontSize(8.5); doc.setFont('helvetica', 'normal'); doc.setTextColor(...C.muted)
-  const confText = [
-    'This document is fully automated and mathematically verified by the FairLens Compliance Engine. No manual signature is required for evidentiary submission under Annex IV guidelines.',
-    '',
-    'All analytical functions computed via deterministic Python execution.',
-    'Article 10 (Data Governance): Anomalies affecting protected groups quantified.',
-    'Article 11 (Technical Documentation): Persists structural logic and dataset profiles.',
-    'Article 12 (Record Logging): Hash trace safely stored for reproducible auditability.'
+  doc.setFontSize(8); doc.setFont('helvetica', 'normal'); doc.setTextColor(...C.muted)
+  const sealLines = [
+    'Article 10 (Data Governance): Protected group anomalies quantified and recorded.',
+    'Article 11 (Technical Documentation): Dataset profile and analytical logic persisted.',
+    'Article 12 (Record Logging): Integrity hash stored for reproducible auditability.',
+    'NOTE: This seal verifies integrity only. Human countersignature is required for legal conformity.',
   ]
-  
-  let confY = y + 28
-  for (const t of confText) {
-    if(t) doc.text(t, M + 5, confY)
-    confY += 4.5
+  let sealY = y + 25
+  for (const line of sealLines) {
+    sealY = checkPage(doc, sealY, 5)
+    doc.text(safeStr(line), M + 5, sealY)
+    sealY += 4
   }
+  y = sealY + 6
+
+  // Human accountability & countersignature fields
+  y = checkPage(doc, y, 65)
+  y = subHeading(doc, 'Accountability & Countersignature (Art. 14 — Mandatory Before Deployment)', y)
+  y += 2
+  const signFields = [
+    ['System Owner / Deployer',            'Name, Title, Organisation, Date'],
+    ['Compliance Officer',                  'Name, Title, Date'],
+    ['Data Protection Officer (DPO)',       'Name, Title, Date (required if DPIA is triggered)'],
+    ['Technical Lead / Model Developer',   'Name, Title, Date'],
+  ]
+  for (const [role, note] of signFields) {
+    y = checkPage(doc, y, 16)
+    doc.setFontSize(8.5); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.text)
+    doc.text(safeStr(role) + ':', M, y)
+    doc.setDrawColor(...C.border); doc.setLineWidth(0.3)
+    doc.line(M + 60, y, PW - M, y)
+    doc.setFontSize(7); doc.setFont('helvetica', 'italic'); doc.setTextColor(...C.muted)
+    doc.text(safeStr(note), M, y + 5)
+    y += 12
+  }
+
+  y += 4
+  y = textBlock(doc, `Methodology: ${METHODOLOGY_VERSION}  |  Integrity Hash: ${vHash}  |  Generated: ${ts}  |  Geographic scope of deployment must be separately documented per Art. 2 of Regulation (EU) 2024/1689.`, M, y, { color: C.muted, maxW: CW, fontSize: 7.5, lineHeight: 1.4 })
 
   pageFooter(doc)
   doc.save(`FairLens_Compliance_Audit_${Date.now()}.pdf`)
