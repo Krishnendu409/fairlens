@@ -10,6 +10,7 @@ class AuditRequest(BaseModel):
     target_column: Optional[str] = None
     sensitive_column: Optional[str] = None
     sensitive_column_2: Optional[str] = None
+    prediction_column: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
@@ -19,16 +20,32 @@ class ChatRequest(BaseModel):
     message: str
 
 
+# ── Confusion matrix ─────────────────────────────────────────────────────────
+
+class ConfusionMatrix(BaseModel):
+    tp: int
+    fp: int
+    tn: int
+    fn: int
+    tpr: Optional[float] = None
+    fpr: Optional[float] = None
+    acc: Optional[float] = None
+
+
 # ── Per-group stats ──────────────────────────────────────────────────────────
 
 class GroupStats(BaseModel):
     group: str
     count: int
-    avg_marks: Optional[float] = None
+    avg_value: Optional[float] = None
+    avg_by_col: Optional[Dict[str, float]] = None
     pass_count: int
     fail_count: int
     pass_rate: float
-    avg_by_subject: Optional[Dict[str, float]] = None
+    tpr: Optional[float] = None
+    fpr: Optional[float] = None
+    accuracy: Optional[float] = None
+    confusion: Optional[ConfusionMatrix] = None
 
 
 # ── Metric result ────────────────────────────────────────────────────────────
@@ -36,22 +53,63 @@ class GroupStats(BaseModel):
 class MetricResult(BaseModel):
     name: str
     key: str
-    value: float
+    value: Optional[float] = None
     threshold: Optional[float] = None
     threshold_direction: str = "below"
     flagged: bool
+    interpretation: str = ""
+
+
+# ── Bias origin ──────────────────────────────────────────────────────────────
+
+class BiasOrigin(BaseModel):
+    group: str
+    metric: str
+
+
+# ── Data reliability ─────────────────────────────────────────────────────────
+
+class DataReliability(BaseModel):
+    reliability: str
+    confidence_score: Optional[float] = None
+    warnings: List[str] = []
+
+
+# ── Statistical test ─────────────────────────────────────────────────────────
+
+class StatisticalTest(BaseModel):
+    test: str
+    statistic: float
+    p_value: float
+    is_significant: bool
     interpretation: str
+    cramers_v: Optional[float] = None
+    effect_size: Optional[str] = None
 
 
-# ── Subject analysis ─────────────────────────────────────────────────────────
+# ── Mitigation ───────────────────────────────────────────────────────────────
 
-class SubjectAnalysis(BaseModel):
-    subject: str
-    teacher: Optional[str] = None
-    avg_marks: float
-    pass_rate: float
-    flagged: bool
-    bias_note: Optional[str] = None
+class MitigationMethodResult(BaseModel):
+    method: str
+    bias_score: float
+    accuracy: Optional[float] = None
+    tpr_gap: Optional[float] = None
+    fpr_gap: Optional[float] = None
+    dpd: float
+    improvement: float
+    final_score: float
+    description: str = ""
+
+
+class MitigationSummary(BaseModel):
+    before_bias_score: float
+    results: List[MitigationMethodResult]
+    best_method: str
+    best_reason: str
+    bias_before: float
+    bias_after: float
+    accuracy_after: Optional[float] = None
+    trade_off_summary: str = ""
 
 
 # ── Main audit response ──────────────────────────────────────────────────────
@@ -63,20 +121,27 @@ class AuditResponse(BaseModel):
     bias_detected: bool
 
     total_rows: int
-    total_students: Optional[int] = None
     columns: List[str]
     sensitive_column: Optional[str] = None
     target_column: Optional[str] = None
+    prediction_column: Optional[str] = None
+    has_predictions: bool = False
 
     metrics: List[MetricResult]
     group_stats: List[GroupStats]
-    subject_analysis: Optional[List[SubjectAnalysis]] = None
+
+    statistical_test: Optional[StatisticalTest] = None
+    bias_origin: Optional[BiasOrigin] = None
+    root_causes: List[str] = []
+    mitigation: Optional[MitigationSummary] = None
+    reliability: Optional[DataReliability] = None
 
     summary: str
     key_findings: List[str]
     recommendations: List[str]
 
     audit_summary_json: str
+    score_breakdown: Optional[Dict[str, Any]] = None
 
 
 class ChatResponse(BaseModel):
