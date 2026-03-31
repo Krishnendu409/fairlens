@@ -57,7 +57,8 @@ const EMPTY_COMPLIANCE = {
 const METRIC_DEFS = {
   'demographic_parity_difference': 'Measures the absolute difference in positive outcome rates between groups. A lower score means groups are treated more equally.',
   'disparate_impact_ratio': 'The ratio of the lowest-performing group\'s pass rate against the highest. The EU typically desires a ratio of 0.8 (80%) or higher.',
-  'theil_index': 'A generalized entropy index measuring total systemic inequality across all individuals simultaneously. 0 means perfect equality.'
+  'theil_index': 'A generalized entropy index measuring total systemic inequality across all individuals simultaneously. 0 means perfect equality.',
+  'performance_gap': 'The average difference in a key numeric feature (e.g. score) between the highest and lowest performing groups. A lower gap indicates more equitable feature distributions.',
 }
 
 // ── Safe Text Encoding ───────────────────────────────────────────────────────
@@ -102,14 +103,19 @@ function statusColor(status) {
   return C.red
 }
 
-function generateVerificationHash(str) {
-  let hash = 0
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i)
-    hash = ((hash << 5) - hash) + char
-    hash = hash & hash // Convert to 32bit integer
+async function generateVerificationHash(str) {
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str))
+    return 'SHA256:' + Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
+  } catch {
+    // Fallback for non-secure contexts (e.g. plain HTTP during development)
+    let hash = 0
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash) + str.charCodeAt(i)
+      hash = hash & hash
+    }
+    return 'SHAx' + Math.abs(hash).toString(16).padStart(12, '0').toUpperCase()
   }
-  return 'SHAx' + Math.abs(hash).toString(16).padStart(12, '0').toUpperCase()
 }
 
 // Returns false when description looks like a placeholder / keyboard-mash
@@ -367,7 +373,7 @@ export async function exportAuditToPdf(result, description) {
   const euRisk = getEURiskClass(result.bias_score ?? 0)
   
   let compliance = normalizeCompliance(result?.compliance_metadata)
-  let integrityHash = generateVerificationHash(JSON.stringify(result) + ts)
+  let integrityHash = await generateVerificationHash(JSON.stringify(result) + ts)
   let exportHash = integrityHash
   let recordId = null
   let hashValid = false
@@ -421,9 +427,10 @@ export async function exportAuditToPdf(result, description) {
   // ── Plain English Scope Statement ──
   cy += 6
   doc.setFillColor(...C.surface); doc.setDrawColor(...C.border); doc.setLineWidth(0.3)
-  doc.roundedRect(M, cy, CW, 26, 2, 2, 'FD')
-  
   const scopeText = `DATASET METADATA & EU COMPLIANCE SCOPE:\nThis dataset involves ${result.total_rows?.toLocaleString() ?? 'several'} records evaluating the decision outcome of "${result.target_column}". The attribute "${result.sensitive_column}" is legally protected against algorithmic discrimination. The objective of this audit is to guarantee that the system's outcomes for "${result.target_column}" are structurally fair across all groups associated with "${result.sensitive_column}".`
+  const scopeLines = doc.splitTextToSize(scopeText, CW - 8)
+  const scopeH = Math.max(26, scopeLines.length * 5 + 10)
+  doc.roundedRect(M, cy, CW, scopeH, 2, 2, 'FD')
   cy = textBlock(doc, scopeText, M + 4, cy + 6, { maxW: CW - 8, color: C.muted, fontSize: 8.5, lineHeight: 1.6 })
 
   // ── Dataset identifier validation warning (Art. 11) ────────────────────────
@@ -535,7 +542,7 @@ export async function exportAuditToPdf(result, description) {
       doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.text)
       doc.text(safeStr(m.name), M + 3, y + 5.5)
       
-      const vStr = m.key === 'performance_gap' ? `${(m.value||0).toFixed(1)}%` : (m.value||0).toFixed(4)
+      const vStr = m.key === 'performance_gap' ? `${(m.value||0).toFixed(2)}` : (m.value||0).toFixed(4)
       doc.setTextColor(...(m.flagged ? C.red : C.green))
       doc.text(m.flagged ? `FAIL [${vStr}]` : `PASS [${vStr}]`, M + CW - 4, y + 5.5, { align: 'right' })
       
@@ -899,13 +906,17 @@ export async function exportAuditToPdf(result, description) {
   y = drawSectionHeader(doc, '10. Declaration of System Conformity', y)
 
   // Article 14 human oversight requirement warning
+  const art14Text = 'Per Article 14 of the EU AI Act, this declaration must be reviewed, validated, and countersigned by a qualified natural person before it has legal evidentiary value. The automated integrity seal below certifies document integrity only — it does not constitute a conformity declaration.'
+  doc.setFontSize(8.5)
+  const art14Lines = doc.splitTextToSize(art14Text, CW - 10)
+  const art14H = Math.max(18, art14Lines.length * 5 + 14)
   doc.setFillColor(255, 249, 237)
   doc.setDrawColor(...C.amber); doc.setLineWidth(0.5)
-  doc.roundedRect(M, y, CW, 18, 2, 2, 'FD')
+  doc.roundedRect(M, y, CW, art14H, 2, 2, 'FD')
   doc.setFontSize(9); doc.setFont('helvetica', 'bold'); doc.setTextColor(...C.amber)
   doc.text('ARTICLE 14 — HUMAN OVERSIGHT REQUIRED BEFORE THIS DECLARATION IS VALID', M + 5, y + 7)
   doc.setFont('helvetica', 'normal'); doc.setTextColor(...C.text); doc.setFontSize(8.5)
-  y = textBlock(doc, 'Per Article 14 of the EU AI Act, this declaration must be reviewed, validated, and countersigned by a qualified natural person before it has legal evidentiary value. The automated integrity seal below certifies document integrity only — it does not constitute a conformity declaration.', M + 5, y + 12, { maxW: CW - 10, fontSize: 8.5, color: C.text })
+  y = textBlock(doc, art14Text, M + 5, y + 12, { maxW: CW - 10, fontSize: 8.5, color: C.text })
   y += 8
 
   // Automated integrity seal (kept for document integrity verification only)

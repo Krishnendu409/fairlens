@@ -33,7 +33,10 @@ def _iso_now() -> str:
 def _merge_metadata(
     incoming: Optional[ComplianceMetadata], existing: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    base = ComplianceMetadata(**(existing or {})).model_dump()
+    try:
+        base = ComplianceMetadata(**(existing or {})).model_dump()
+    except Exception:
+        base = ComplianceMetadata().model_dump()
     if incoming:
         inc = incoming.model_dump(exclude_none=True)
         for key, value in inc.items():
