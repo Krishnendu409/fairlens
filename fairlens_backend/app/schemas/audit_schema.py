@@ -143,6 +143,12 @@ class AuditResponse(BaseModel):
     audit_summary_json: str
     score_breakdown: Optional[Dict[str, Any]] = None
 
+    plain_language: Dict[str, str] = {}
+    all_numeric_gaps: List[Dict[str, Any]] = []
+    primary_numeric_column: Optional[str] = None
+    sample_rows: List[Dict[str, Any]] = []
+    group_rates_map: Dict[str, float] = {}
+
 
 class ChatResponse(BaseModel):
     reply: str

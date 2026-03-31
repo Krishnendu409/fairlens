@@ -223,6 +223,18 @@ def compute_raw_stats(df: pd.DataFrame, description: str,
                 negative_class = v
                 break
 
+    # ── All numeric feature columns (for avg_by_col and gap analysis) ────────
+    _id_patterns = {"id", "index", "row", "num", "no", "number", "sno", "serial"}
+    _reserved    = {c for c in (target_col, sensitive_col, prediction_col) if c}
+    all_numeric_cols = [
+        c for c in df.columns
+        if pd.api.types.is_numeric_dtype(df[c])
+        and c.lower().strip() not in _id_patterns
+        and df[c].nunique() > 2
+        and df[c].nunique() < len(df)
+        and c not in _reserved
+    ]
+
     # ── Per-group stats ──────────────────────────────────────────────────────
     group_stats: list[dict] = []
     if sensitive_col and sensitive_col in df.columns:
@@ -238,6 +250,15 @@ def compute_raw_stats(df: pd.DataFrame, description: str,
                 pass_rate = round(float(pass_ct / total), 4) if total > 0 else 0.0
 
             avg_value = round(float(gdf[numeric_col].mean()), 2) if numeric_col else None
+
+            # Per-column averages for all numeric feature columns
+            avg_by_col: dict = {}
+            for nc in all_numeric_cols:
+                try:
+                    v = gdf[nc].mean()
+                    avg_by_col[nc] = round(float(v), 2) if not pd.isna(v) else None
+                except Exception:
+                    avg_by_col[nc] = None
 
             # TPR and FPR: ONLY when prediction_column is provided
             # In label-only mode these are None — not 0.0, not pass_rate
@@ -257,9 +278,19 @@ def compute_raw_stats(df: pd.DataFrame, description: str,
             group_stats.append({
                 "group": str(g), "count": total,
                 "avg_value": avg_value,
+                "avg_by_col": avg_by_col if avg_by_col else None,
                 "pass_count": pass_ct, "fail_count": fail_ct, "pass_rate": pass_rate,
                 "tpr": tpr, "fpr": fpr, "accuracy": accuracy, "confusion": cm,
             })
+
+    # ── Group rates map (group → pass_rate) for counterfactual editor ────────
+    group_rates_map = {g["group"]: g["pass_rate"] for g in group_stats}
+
+    # ── Sample rows for counterfactual editor (first 20 rows) ────────────────
+    try:
+        _sample_rows = json.loads(df.head(20).to_json(orient="records"))
+    except Exception:
+        _sample_rows = []
 
     # ── Core fairness metrics ────────────────────────────────────────────────
     rates = [g["pass_rate"] for g in group_stats]
@@ -274,6 +305,45 @@ def compute_raw_stats(df: pd.DataFrame, description: str,
 
     avg_vals = [g["avg_value"] for g in group_stats if g["avg_value"] is not None]
     avg_gap  = round(float(max(avg_vals) - min(avg_vals)), 2) if len(avg_vals) >= 2 else 0.0
+
+    # ── Per-column numeric gap analysis ──────────────────────────────────────
+    all_numeric_gaps: list[dict] = []
+    for nc in all_numeric_cols:
+        try:
+            col_avgs: dict = {}
+            for gs_item in group_stats:
+                ab = gs_item.get("avg_by_col") or {}
+                v  = ab.get(nc)
+                if v is not None:
+                    col_avgs[gs_item["group"]] = v
+            if len(col_avgs) < 2:
+                continue
+            lo_grp = min(col_avgs, key=col_avgs.get)
+            hi_grp = max(col_avgs, key=col_avgs.get)
+            lo_val = col_avgs[lo_grp]
+            hi_val = col_avgs[hi_grp]
+            raw_gap = hi_val - lo_val
+            col_min = float(df[nc].min())
+            col_max = float(df[nc].max())
+            col_range = col_max - col_min
+            gap_pct = round((raw_gap / col_range) * 100, 1) if col_range > 0 else 0.0
+            all_numeric_gaps.append({
+                "col":      nc,
+                "gap_pct":  gap_pct,
+                "gap_raw":  round(float(raw_gap), 2),
+                "lo_group": lo_grp,
+                "lo_avg":   round(float(lo_val), 2),
+                "hi_group": hi_grp,
+                "hi_avg":   round(float(hi_val), 2),
+                "avgs":     {k: round(float(v), 2) for k, v in col_avgs.items()},
+            })
+        except Exception:
+            continue
+
+    # Primary numeric column is the one with the largest gap (or the first detected)
+    primary_numeric_column: Optional[str] = numeric_col
+    if all_numeric_gaps:
+        primary_numeric_column = max(all_numeric_gaps, key=lambda x: x["gap_pct"])["col"]
 
     # Theil — uses pass_rates; guard against zero rates for log
     theil = compute_theil_index(rates)
@@ -407,6 +477,10 @@ Formula: mean({[round(v*100,1) for v in violations]}) = {bias_score}"""
             "score_breakdown": score_breakdown,
             "positive_class": str(positive_class) if positive_class is not None else None,
             "negative_class": str(negative_class) if negative_class is not None else None,
+            "all_numeric_gaps":        all_numeric_gaps,
+            "primary_numeric_column":  primary_numeric_column,
+            "sample_rows":             _sample_rows,
+            "group_rates_map":         group_rates_map,
         },
     }
 
@@ -910,6 +984,12 @@ def build_prompt(stats: dict, root_causes: list[str], reliability: dict) -> str:
 
     schema = (
         f'{{"metric_interpretations":{{{metric_keys}}},'
+        '"plain_language":{'
+        '"overall":"2-3 sentence plain-English summary of the bias findings for a non-technical reader",'
+        '"demographic_parity_difference":"1 sentence plain-English explanation of this metric value",'
+        '"disparate_impact_ratio":"1 sentence plain-English explanation of this metric value",'
+        '"statistical_test":"1 sentence plain-English meaning of the statistical significance result"'
+        '},'
         '"summary":"para1\\n\\npara2\\n\\npara3",'
         '"key_findings":["f1","f2","f3","f4","f5"],'
         '"recommendations":["r1","r2","r3","r4"]}}'
@@ -923,10 +1003,12 @@ def build_prompt(stats: dict, root_causes: list[str], reliability: dict) -> str:
         "RULES:\n"
         "1. Output ONLY valid JSON. No markdown.\n"
         "2. metric_interpretations: 1 sentence ≤20 words with actual value.\n"
-        "3. summary: 3 paragraphs (\\n\\n), ≤90 words total. Use actual group names.\n"
-        "4. key_findings: 5 items ≤25 words each. Every item must cite real numbers.\n"
-        "5. recommendations: 4 specific actionable items ≤25 words each.\n"
-        "6. DO NOT invent groups, teachers, or columns not in the statistics.\n\n"
+        "3. plain_language.overall: 2-3 sentences, accessible to non-technical readers, cite key numbers.\n"
+        "4. plain_language per metric: 1 plain-English sentence ≤25 words with actual value.\n"
+        "5. summary: 3 paragraphs (\\n\\n), ≤90 words total. Use actual group names.\n"
+        "6. key_findings: 5 items ≤25 words each. Every item must cite real numbers.\n"
+        "7. recommendations: 4 specific actionable items ≤25 words each.\n"
+        "8. DO NOT invent groups, teachers, or columns not in the statistics.\n\n"
         "Fill ALL placeholders:\n" + schema
     )
 
@@ -997,6 +1079,7 @@ def merge_into_response(stats, ai, root_causes, bias_origin_dict,
     group_stats = [
         GroupStats(
             group=g["group"], count=g["count"], avg_value=g.get("avg_value"),
+            avg_by_col=g.get("avg_by_col"),
             pass_count=g["pass_count"], fail_count=g["fail_count"],
             pass_rate=g["pass_rate"],
             tpr=g.get("tpr"),       # None in label-only — NOT 0.0
@@ -1006,6 +1089,14 @@ def merge_into_response(stats, ai, root_causes, bias_origin_dict,
         )
         for g in c["group_stats"]
     ]
+
+    # plain_language: merge Gemini plain_language + metric_interpretations as fallback
+    _raw_pl = ai.get("plain_language")
+    plain_lang: dict = _raw_pl if isinstance(_raw_pl, dict) else {}
+    # Ensure per-metric keys exist in plain_language (fall back to metric_interpretations)
+    for m in metrics:
+        if m.key not in plain_lang and m.interpretation:
+            plain_lang[m.key] = m.interpretation
 
     audit_summary = _safe_json({
         "bias_score":        c["bias_score"],
@@ -1042,6 +1133,11 @@ def merge_into_response(stats, ai, root_causes, bias_origin_dict,
         recommendations=[r for r in (ai.get("recommendations") or []) if isinstance(r, str)],
         audit_summary_json=audit_summary,
         score_breakdown=c.get("score_breakdown"),
+        plain_language=plain_lang,
+        all_numeric_gaps=c.get("all_numeric_gaps", []),
+        primary_numeric_column=c.get("primary_numeric_column"),
+        sample_rows=c.get("sample_rows", []),
+        group_rates_map=c.get("group_rates_map", {}),
     )
 
 
@@ -1055,7 +1151,7 @@ async def call_gemini(prompt: str) -> dict:
         resp = await client.post(
             GEMINI_URL, params={"key": GEMINI_API_KEY},
             json={"contents": [{"parts": [{"text": prompt}]}],
-                  "generationConfig": {"temperature": 0.0, "maxOutputTokens": 4096}},
+                  "generationConfig": {"temperature": 0.0, "maxOutputTokens": 6000}},
         )
     if resp.status_code != 200:
         raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:400]}")
