@@ -33,3 +33,9 @@ app.include_router(audit_router)
 @app.get("/", tags=["Health"])
 async def root():
     return {"status": "FairLens API v2.0 is running", "modes": ["text-analysis", "dataset-audit"]}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
