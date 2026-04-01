@@ -954,7 +954,7 @@ export default function AuditResultsPage() {
                   threshold: null,
                   threshold_direction: 'below',
                   flagged: Boolean(statistical_test.is_significant),
-                  interpretation: `p-value=${(statistical_test.p_value ?? 1).toFixed(6)} · ${statistical_test.is_significant ? 'Significant association detected.' : 'No significant association detected.'}`,
+                  interpretation: `p-value=${(statistical_test.p_value ?? 1).toFixed(6)}`,
                 }] : []),
               ].map(m => (
                 <MetricCard key={m.key} metric={m} plainLang={plain_language[m.key]}/>

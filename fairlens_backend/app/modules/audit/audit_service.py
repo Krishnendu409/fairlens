@@ -593,10 +593,7 @@ def run_statistical_test(df: pd.DataFrame, sensitive_col: str,
             "statistic": round(float(chi2), 4),
             "p_value": round(float(p), 6),
             "is_significant": sig,
-            "interpretation": (
-                f"Chi-square={chi2:.3f}, p={p:.4f}, dof={dof}. "
-                f"{'Bias IS statistically significant (p<0.05).' if sig else 'Bias NOT statistically significant (p≥0.05).'}"
-            ),
+            "interpretation": f"χ²={chi2:.3f}, p={p:.4f}, dof={dof}.",
             "cramers_v": cramers_v,
             "effect_size": effect_size,
         }
