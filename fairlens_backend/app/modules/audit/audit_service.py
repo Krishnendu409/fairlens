@@ -69,6 +69,7 @@ MAX_CHAT_TURNS = 10
 MAX_STORED_DESCRIPTION_CHARS = 2000
 HIGH_CARD_LIMIT = 20
 PII_COLUMN_KEYWORDS = {"name", "email", "phone", "mobile", "address", "ssn", "dob", "birth", "passport"}
+MAX_CHAT_MESSAGE_CHARS = 1200
 
 DOMAIN_SCENARIO_KEYWORDS = {
     "hr_employment": {
@@ -1891,14 +1892,15 @@ async def run_chat(request: ChatRequest) -> ChatResponse:
         f"Answer concisely (2-3 paragraphs). Reference actual numbers. Give practical advice."
     )
     hist = "".join(
-        f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}\n\n"
+        f"{'User' if m.get('role')=='user' else 'Assistant'}: {str(m.get('content', ''))[:MAX_CHAT_MESSAGE_CHARS]}\n\n"
         for m in request.conversation[-MAX_CHAT_TURNS:]
     )
+    msg = (request.message or "")[:MAX_CHAT_MESSAGE_CHARS]
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 GEMINI_URL, params={"key": GEMINI_API_KEY},
-                json={"contents": [{"parts": [{"text": f"{ctx}\n\n{hist}User: {request.message}\n\nAssistant:"}]}],
+                json={"contents": [{"parts": [{"text": f"{ctx}\n\n{hist}User: {msg}\n\nAssistant:"}]}],
                       "generationConfig": {"temperature": 0.3, "maxOutputTokens": 800}},
             )
     except httpx.TransportError as exc:

@@ -29,6 +29,7 @@ router = APIRouter(tags=["Audit"])
 store = ComplianceFileStore()
 audit_storage = JSONStorageManager()
 SAMPLE_ROWS = 100
+# Fixed seeds are intentional for deterministic, reproducible demo samples.
 
 
 def _generate_compas_sample_csv(rows: int = SAMPLE_ROWS) -> str:

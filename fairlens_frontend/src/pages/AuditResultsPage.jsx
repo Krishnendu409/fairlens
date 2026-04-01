@@ -587,6 +587,7 @@ export default function AuditResultsPage() {
   const [shareError, setShareError] = useState('')
   const [idFetchedResult, setIdFetchedResult] = useState(null)
   const [idFetchError, setIdFetchError] = useState('')
+  const sharedParam = searchParams.get('shared')
 
   let result, datasetDescription
   if (location.state?.result) {
@@ -596,13 +597,11 @@ export default function AuditResultsPage() {
     datasetDescription = ''
   } else if (searchParams.get('id')) {
     result = null
-  } else if (searchParams.get('shared')) {
-    const decoded = decodeShareData(searchParams.get('shared'))
+  } else if (sharedParam) {
+    const decoded = decodeShareData(sharedParam)
     if (decoded?.data?.result) {
       result = decoded.data.result
       datasetDescription = decoded.data.description || ''
-    } else if (decoded?.error) {
-      setTimeout(() => setShareError(decoded.error), 0)
     }
   } else {
     try {
@@ -628,6 +627,12 @@ export default function AuditResultsPage() {
     })()
     return () => { active = false }
   }, [searchParams])
+
+  useEffect(() => {
+    if (!sharedParam) return
+    const decoded = decodeShareData(sharedParam)
+    if (decoded?.error) setShareError(decoded.error)
+  }, [sharedParam])
 
   useEffect(() => {
     if (result) {

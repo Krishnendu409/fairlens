@@ -4,9 +4,11 @@ Reusable utility methods for FairLens backend.
 """
 
 import json
+import logging
 import re
 
 MAX_GEMINI_USER_CONTENT_CHARS = 4000
+logger = logging.getLogger(__name__)
 
 
 def build_gemini_prompt(prompt: str, ai_response: str) -> str:
@@ -59,6 +61,7 @@ def parse_gemini_response(raw_text: str) -> dict:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
+        logger.warning("Gemini returned invalid JSON; raw excerpt=%s", str(raw_text)[:300])
         raise ValueError(f"Gemini returned invalid JSON: {e}")
 
 

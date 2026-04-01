@@ -5,6 +5,7 @@ Run locally: uvicorn main:app --reload
 """
 
 import os
+import logging
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +19,7 @@ app = FastAPI(
     description="AI bias detection backend — text analysis + dataset fairness auditing.",
     version="2.0.0",
 )
+logging.basicConfig(level=logging.INFO)
 
 # ─── CORS ────────────────────────────────────────────────────────────────────
 app.add_middleware(
