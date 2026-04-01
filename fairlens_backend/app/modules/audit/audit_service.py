@@ -29,7 +29,13 @@ LABEL-ONLY MODE:
   Showing 0.0000 for unmeasured metrics is misleading — they are None.
 """
 
-import os, json, re, base64, io, ssl
+import asyncio
+import base64
+import io
+import json
+import os
+import re
+import ssl
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -37,6 +43,23 @@ import numpy as np
 import pandas as pd
 import httpx
 from scipy import stats as scipy_stats
+from sklearn.compose import ColumnTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+
+try:
+    from fairlearn.reductions import DemographicParity, ExponentiatedGradient
+except Exception:  # pragma: no cover
+    DemographicParity = None
+    ExponentiatedGradient = None
+
+try:
+    from aif360.algorithms.preprocessing import Reweighing
+    from aif360.datasets import BinaryLabelDataset
+except Exception:  # pragma: no cover
+    Reweighing = None
+    BinaryLabelDataset = None
 
 from app.schemas.audit_schema import (
     AuditRequest, AuditResponse, ChatRequest, ChatResponse,
@@ -44,6 +67,11 @@ from app.schemas.audit_schema import (
     ConfusionMatrix, StatisticalTest,
     MitigationMethodResult, MitigationSummary,
 )
+from app.modules.analyse.metrics.engine import compute_all_metrics
+from app.modules.analyse.metrics.statistical_metrics import chi_square_test
+from app.modules.audit.audit_utils import compute_audit_integrity_hash
+from app.modules.audit.compliance_engine import evaluate_compliance
+from app.modules.audit.compliance_store import JSONStorageManager
 
 load_dotenv()
 
@@ -66,6 +94,10 @@ def _safe_json(obj) -> str:
             if isinstance(o, np.floating): return float(o)
             return super().default(o)
     return json.dumps(obj, cls=_Enc)
+
+
+def _mitigation_dependencies_available() -> bool:
+    return MITIGATION_DEPS_AVAILABLE
 
 
 def _build_gemini_url() -> str:
@@ -91,6 +123,13 @@ def _build_gemini_url() -> str:
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_URL = _build_gemini_url()
+GEMINI_RETRIES = int(os.getenv("GEMINI_RETRIES", "2"))
+GEMINI_TIMEOUT_AUDIT = float(os.getenv("GEMINI_TIMEOUT_AUDIT", "120"))
+AUDIT_STORE = JSONStorageManager()
+MITIGATION_DEPS_AVAILABLE = all(
+    dep is not None
+    for dep in (DemographicParity, ExponentiatedGradient, Reweighing, BinaryLabelDataset)
+)
 
 
 def _unwrap_ssl_error(exc: Exception) -> Optional[ssl.SSLCertVerificationError]:
@@ -115,6 +154,19 @@ def decode_csv(b64: str) -> pd.DataFrame:
     if b64.startswith("data:"):
         b64 = b64.split(",", 1)[1]
     return pd.read_csv(io.BytesIO(base64.b64decode(b64)))
+
+
+def validate_dataset_for_audit(df: pd.DataFrame, target_col: Optional[str], sensitive_col: Optional[str]) -> None:
+    if df.empty:
+        raise ValueError("Dataset is empty.")
+    if len(df.columns) < 2:
+        raise ValueError("Dataset must contain at least 2 columns.")
+    if target_col and target_col not in df.columns:
+        raise ValueError(f"target_column '{target_col}' not found in dataset.")
+    if sensitive_col and sensitive_col not in df.columns:
+        raise ValueError(f"sensitive_column '{sensitive_col}' not found in dataset.")
+    if sensitive_col and df[sensitive_col].dropna().nunique() < 2:
+        raise ValueError("Sensitive attribute must contain at least two non-empty groups.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -377,14 +429,15 @@ def compute_raw_stats(df: pd.DataFrame, description: str,
     if all_numeric_gaps:
         primary_numeric_column = max(all_numeric_gaps, key=lambda x: x["gap_pct"])["col"]
 
-    # Theil — uses pass_rates; guard against zero rates for log
-    theil = compute_theil_index(rates)
-
     # True EO — only when prediction column present
     tpr_list = [g["tpr"] for g in group_stats if g["tpr"] is not None]
     fpr_list = [g["fpr"] for g in group_stats if g["fpr"] is not None]
-    tpr_gap  = round(float(max(tpr_list) - min(tpr_list)), 4) if len(tpr_list) >= 2 else None
-    fpr_gap  = round(float(max(fpr_list) - min(fpr_list)), 4) if len(fpr_list) >= 2 else None
+    metric_map = compute_all_metrics(rates, tpr_list if has_predictions else None, fpr_list if has_predictions else None)
+    tpr_gap = metric_map.get("tpr_gap")
+    fpr_gap = metric_map.get("fpr_gap")
+    dpd = metric_map["demographic_parity_difference"]
+    dir_ = metric_map["disparate_impact_ratio"]
+    theil = metric_map["theil_index"]
 
     # ── Bias score: average only AVAILABLE violations ────────────────────────
     dpd_v = min(dpd / 0.10, 1.0)
@@ -525,11 +578,12 @@ def run_statistical_test(df: pd.DataFrame, sensitive_col: str,
                          target_col: str, positive_class) -> dict:
     try:
         contingency = pd.crosstab(df[sensitive_col], df[target_col])
-        chi2, p, dof, _ = scipy_stats.chi2_contingency(contingency)
-        sig = bool(p < 0.05)
-        n = int(contingency.values.sum())
-        k = min(contingency.shape)
-        cramers_v = round(float(np.sqrt(float(chi2) / (n * (k - 1)))), 4) if n > 0 and k > 1 else None
+        test = chi_square_test(contingency)
+        chi2 = float(test["statistic"])
+        p = float(test["p_value"])
+        dof = int(test.get("dof", 0))
+        sig = bool(test["is_significant"])
+        cramers_v = test.get("cramers_v")
         if cramers_v is not None:
             if cramers_v >= 0.40:   effect_size = "large"
             elif cramers_v >= 0.20: effect_size = "medium"
@@ -650,7 +704,7 @@ def _method_reweighing(df, computed):
             wpr = float((w*(gdf[tc]==pc)).sum()/w.sum())
             new_rates.append(round(max(0.0,min(1.0,wpr)),4))
         acc = _compute_true_accuracy(gs, new_rates)
-        # bias score recomputed below from dpd/dir after adjustment — _bias_score_from_rates not used here
+        dpd = round(max(new_rates)-min(new_rates),4) if len(new_rates)>=2 else 0.0
         dpd_after = round(max(new_rates) - min(new_rates), 4) if len(new_rates) >= 2 else 0.0
         dir_after = round(min(new_rates)/max(new_rates), 4) if len(new_rates)>=2 and max(new_rates)>0 else 1.0
         return {"method":"reweighing","accuracy":acc,"dpd":dpd_after,"dir":dir_after,
@@ -688,7 +742,7 @@ def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
         if not best_rates:
             return {"method":"threshold_optimisation","error":"no groups processed"}
         acc = float(round(max(0.0,min(1.0,total_correct/total_n)),4)) if total_n>0 else 0.5
-        # bias score recomputed below from dpd/dir after adjustment — _bias_score_from_rates not used here
+        dpd = round(max(best_rates)-min(best_rates),4) if len(best_rates)>=2 else 0.0
         dpd_after = round(max(best_rates)-min(best_rates),4) if len(best_rates)>=2 else 0.0
         dir_after = round(min(best_rates)/max(best_rates),4) if len(best_rates)>=2 and max(best_rates)>0 else 1.0
         return {"method":"threshold_optimisation","accuracy":acc,"dpd":dpd_after,"dir":dir_after,
@@ -718,7 +772,7 @@ def _method_adversarial(df, computed, lambda_penalty=0.5):
                 adjusted = [max(0.001,min(1.0,r*scale)) for r in adjusted]
             if max(adjusted)-min(adjusted) < 0.01: break
         acc = _compute_true_accuracy(gs, adjusted)
-        # bias score recomputed below from dpd/dir after adjustment — _bias_score_from_rates not used here
+        dpd = round(max(adjusted)-min(adjusted),4)
         dpd_after = round(max(adjusted)-min(adjusted),4)
         dir_after = round(min(adjusted)/max(adjusted),4) if max(adjusted)>0 else 1.0
         return {"method":"adversarial_debiasing","accuracy":acc,"dpd":dpd_after,"dir":dir_after,
@@ -728,140 +782,182 @@ def _method_adversarial(df, computed, lambda_penalty=0.5):
 
 
 def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
-    """
-    Run all 3 mitigation methods and rank them.
+    if not _mitigation_dependencies_available():
+        return MitigationSummary(
+            before_bias_score=float(computed.get("bias_score", 0.0)),
+            results=[],
+            best_method="dependencies_missing",
+            best_reason="Install fairlearn and aif360 to run real mitigation.",
+            bias_before=float(computed.get("bias_score", 0.0)),
+            bias_after=float(computed.get("bias_score", 0.0)),
+            accuracy_after=None,
+            trade_off_summary="Mitigation skipped due to missing optional dependencies.",
+        )
+    before_score = float(computed["bias_score"])
+    before_dpd = float(computed.get("dpd", 0.0))
+    before_dir = float(computed.get("dir_", 1.0) or 1.0)
+    sc = computed.get("sensitive_col")
+    tc = computed.get("target_col")
+    if not sc or not tc or sc not in df.columns or tc not in df.columns:
+        return MitigationSummary(
+            before_bias_score=before_score,
+            results=[],
+            best_method="not_available",
+            best_reason="Mitigation requires valid sensitive and target columns.",
+            bias_before=before_score,
+            bias_after=before_score,
+            accuracy_after=None,
+            trade_off_summary="No mitigation run.",
+        )
 
-    KEY DESIGN DECISIONS:
-    - All methods simulate what bias WOULD look like after their intervention.
-    - Reweighing: weights converge pass rates to global mean -> projected DPD~0.
-      BUT: this requires model retraining. We apply a 0.85 confidence discount
-      to bias_reduction to reflect that the improvement is projected, not guaranteed.
-    - Threshold optimisation: finds per-group threshold minimising |rate - median|.
-    - Adversarial debiasing: iterative gradient equalisation toward global mean.
+    local_df = df[[c for c in df.columns if c not in []]].dropna(subset=[sc, tc]).copy()
+    local_df["_sensitive"] = local_df[sc].astype(str)
+    local_df["_label"] = (local_df[tc] == computed.get("positive_class")).astype(int)
+    if local_df["_label"].nunique() < 2 or local_df["_sensitive"].nunique() < 2:
+        return MitigationSummary(
+            before_bias_score=before_score,
+            results=[],
+            best_method="not_available",
+            best_reason="Mitigation requires at least two labels and two groups.",
+            bias_before=before_score,
+            bias_after=before_score,
+            accuracy_after=None,
+            trade_off_summary="No mitigation run.",
+        )
 
-    Ranking: final_score = 0.5*bias_reduction + 0.4*accuracy + 0.1*stability
-    Methods that INCREASE bias get final_score = -1 (invalid).
-    """
-    before_score   = computed["bias_score"]
-    before_dpd     = float(computed.get("dpd", 0.0))
-    before_dir     = float(computed.get("dir_", 1.0) or 1.0)
-    group_stats    = computed["group_stats"]
-    original_rates = [float(gs["pass_rate"]) for gs in group_stats]
-    global_target  = float(np.median(original_rates))
+    feature_cols = [c for c in local_df.columns if c not in {tc, "_label", "_sensitive"}]
+    if not feature_cols:
+        return MitigationSummary(
+            before_bias_score=before_score,
+            results=[],
+            best_method="not_available",
+            best_reason="Mitigation requires at least one feature column.",
+            bias_before=before_score,
+            bias_after=before_score,
+            accuracy_after=None,
+            trade_off_summary="No mitigation run.",
+        )
 
-    descriptions = {
-        "reweighing": (
-            f"Assigns sample weights w(g,y)=P(Y=y)·P(G=g)/P(Y=y,G=g). "
-            f"Projected DPD converges toward 0 after retraining. "
-            f"Confidence-discounted: actual improvement may vary."
-        ),
-        "threshold_optimisation": (
-            f"Finds the decision threshold per group minimising "
-            f"|rate−{global_target:.1%}| (global median) + 0.5×(1−accuracy). "
-            f"Post-processing: no retraining required."
-        ),
-        "adversarial_debiasing": (
-            f"Iterative gradient equalisation: rate_g ← rate_g − 0.5×(rate_g−mean). "
-            f"Preserves global mean; converges when max−min < 1%."
-        ),
-    }
+    X = local_df[feature_cols]
+    y = local_df["_label"].astype(int)
+    A = local_df["_sensitive"]
 
-    # Confidence discount per method (how reliable is the projected improvement)
-    confidence = {
-        "reweighing":             0.85,   # requires retraining — projected
-        "threshold_optimisation": 0.92,   # post-processing — fairly reliable
-        "adversarial_debiasing":  0.80,   # iterative simulation — optimistic
-    }
+    categorical = [c for c in feature_cols if not pd.api.types.is_numeric_dtype(local_df[c])]
+    numeric = [c for c in feature_cols if pd.api.types.is_numeric_dtype(local_df[c])]
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", "passthrough", numeric),
+            ("cat", OneHotEncoder(handle_unknown="ignore"), categorical),
+        ]
+    )
 
-    raw_results = [
-        _method_reweighing(df, computed),
-        _method_threshold_optimisation(df, computed),
-        _method_adversarial(df, computed),
-    ]
+    base_pipe = Pipeline(
+        steps=[
+            ("prep", preprocessor),
+            ("clf", LogisticRegression(max_iter=500, solver="lbfgs")),
+        ]
+    )
+    base_pipe.fit(X, y)
+    preds_before = pd.Series(base_pipe.predict(X), index=local_df.index)
 
-    results = []
-    for r in raw_results:
-        if r is None or not isinstance(r, dict):
-            r = {"method": "unknown", "error": "method returned None"}
-        method = r.get("method", "unknown")
-
-        if "error" in r:
-            acc       = 0.0
-            dpd_after = before_dpd
-            dir_after = before_dir
-            adj_rates = original_rates
-            valid     = False
-        else:
-            acc       = float(r.get("accuracy") or 0.0)
-            dpd_after = float(r.get("dpd", before_dpd))
-            dir_after = float(r.get("dir", before_dir))
-            adj_rates = r.get("adjusted_rates", original_rates)
-            valid     = bool(dpd_after < before_dpd)   # valid if DPD actually decreased
-
-        acc       = max(0.0, min(1.0, acc))
-        dpd_after = max(0.0, min(1.0, dpd_after))
-
-        # DPD reduction (0→1): how much disparity was removed
-        dpd_reduction = max(0.0, min(1.0, (before_dpd - dpd_after) / before_dpd)) if before_dpd > 0 else 0.0
-
-        # Apply confidence discount per method
-        conf          = confidence.get(method, 0.80)
-        adj_dpd_red   = dpd_reduction * conf
-
-        stability     = _compute_stability([float(x) for x in adj_rates])
-
-        # Rank: 40% DPD reduction, 40% accuracy, 20% stability
-        final_score = round(
-            0.4 * adj_dpd_red + 0.4 * acc + 0.2 * stability, 4
-        ) if valid else -1.0
-
-        # Compute projected bias score using the SAME formula as compute_raw_stats
-        # so it's consistent and meaningful
+    def _group_metrics(preds: pd.Series) -> dict:
+        groups = []
+        for group_name, gdf in local_df.assign(_pred=preds.values).groupby("_sensitive"):
+            n = len(gdf)
+            if n == 0:
+                continue
+            pass_rate = float((gdf["_pred"] == 1).mean())
+            tp = int(((gdf["_pred"] == 1) & (gdf["_label"] == 1)).sum())
+            fp = int(((gdf["_pred"] == 1) & (gdf["_label"] == 0)).sum())
+            tn = int(((gdf["_pred"] == 0) & (gdf["_label"] == 0)).sum())
+            fn = int(((gdf["_pred"] == 0) & (gdf["_label"] == 1)).sum())
+            tpr = tp / (tp + fn) if (tp + fn) > 0 else None
+            fpr = fp / (fp + tn) if (fp + tn) > 0 else None
+            groups.append({"group": str(group_name), "pass_rate": pass_rate, "tpr": tpr, "fpr": fpr})
+        rates = [g["pass_rate"] for g in groups]
+        tprs = [g["tpr"] for g in groups]
+        fprs = [g["fpr"] for g in groups]
+        m = compute_all_metrics(rates, tprs, fprs)
+        acc = float((preds == y).mean())
+        dpd_after = float(m["demographic_parity_difference"])
+        dir_after = float(m["disparate_impact_ratio"] or 1.0)
         proj_dpd_v = min(dpd_after / 0.10, 1.0)
         proj_dir_v = 0.0 if dir_after >= 0.80 else min((0.80 - dir_after) / 0.80, 1.0)
-        proj_bias  = round(float(np.mean([proj_dpd_v, proj_dir_v])) * 100, 1)
+        bias = round(float(np.mean([proj_dpd_v, proj_dir_v])) * 100, 1)
+        return {
+            "dpd": round(dpd_after, 4),
+            "dir": round(dir_after, 4),
+            "tpr_gap": m.get("tpr_gap"),
+            "fpr_gap": m.get("fpr_gap"),
+            "accuracy": round(acc, 4),
+            "bias_score": bias,
+        }
 
-        tpr_gap_val = r.get("tpr_gap") if isinstance(r, dict) else None
-        fpr_gap_val = r.get("fpr_gap") if isinstance(r, dict) else None
-        dpd_val     = dpd_after
+    fair_model = ExponentiatedGradient(
+        estimator=Pipeline(steps=[("prep", preprocessor), ("clf", LogisticRegression(max_iter=500, solver="lbfgs"))]),
+        constraints=DemographicParity(),
+    )
+    fair_model.fit(X, y, sensitive_features=A)
+    preds_fairlearn = pd.Series(fair_model.predict(X), index=local_df.index)
 
-        results.append(MitigationMethodResult(
-            method=method,
-            bias_score=round(proj_bias, 1),
-            accuracy=round(acc, 4),
-            tpr_gap=round(float(tpr_gap_val), 4) if tpr_gap_val is not None else 0.0,
-            fpr_gap=round(float(fpr_gap_val), 4) if fpr_gap_val is not None else 0.0,
-            dpd=round(dpd_val, 4),
-            improvement=round(before_score - proj_bias, 1),
-            final_score=final_score,
-            description=(
-                descriptions.get(method, "")
-                + ("" if valid else " ⚠ Invalid: method did not reduce bias.")
-            ),
-        ))
+    rw_dataset = BinaryLabelDataset(
+        df=local_df[[*feature_cols, "_label", "_sensitive"]].rename(columns={"_label": "label", "_sensitive": "group"}),
+        label_names=["label"],
+        protected_attribute_names=["group"],
+    )
+    rw = Reweighing(
+        unprivileged_groups=[{"group": rw_dataset.unprivileged_protected_attributes[0][0]}],
+        privileged_groups=[{"group": rw_dataset.privileged_protected_attributes[0][0]}],
+    )
+    rw.fit(rw_dataset)
+    transformed = rw.transform(rw_dataset).convert_to_dataframe()[0]
+    X_rw = transformed[[c for c in transformed.columns if c not in {"label", "group", "instance_weights"}]]
+    y_rw = transformed["label"].astype(int)
+    w_rw = transformed.get("instance_weights")
+    rw_pipe = Pipeline(steps=[("prep", preprocessor), ("clf", LogisticRegression(max_iter=500, solver="lbfgs"))])
+    if w_rw is not None:
+        rw_pipe.fit(X_rw, y_rw, clf__sample_weight=w_rw.values)
+    else:
+        rw_pipe.fit(X_rw, y_rw)
+    preds_rw = pd.Series(rw_pipe.predict(local_df[feature_cols]), index=local_df.index)
 
-    valid_results = [r for r in results if r.final_score >= 0]
-    best = (max(valid_results, key=lambda x: x.final_score)
-            if valid_results
-            else min(results, key=lambda x: x.bias_score))
+    baseline = _group_metrics(preds_before)
+    fairlearn_after = _group_metrics(preds_fairlearn)
+    rw_after = _group_metrics(preds_rw)
 
-    bias_after  = best.bias_score
-    acc_after   = best.accuracy
-    dpd_after_b = best.dpd
-    improvement = round(before_score - bias_after, 1)
-    dpd_improv  = round(before_dpd - dpd_after_b, 4)
-    pct_reduc   = round((improvement / before_score * 100), 1) if before_score > 0 else 0.0
+    methods = [
+        ("fairlearn_exponentiated_gradient", fairlearn_after, "Constraint-based reduction with DemographicParity."),
+        ("aif360_reweighing", rw_after, "Instance reweighing followed by weighted logistic retraining."),
+    ]
+    results = []
+    for method_name, after, desc in methods:
+        improvement = round(before_score - after["bias_score"], 1)
+        dpd_reduction = max(0.0, before_dpd - after["dpd"])
+        final_score = round((0.5 * dpd_reduction) + (0.5 * after["accuracy"]), 4)
+        results.append(
+            MitigationMethodResult(
+                method=method_name,
+                bias_score=after["bias_score"],
+                accuracy=after["accuracy"],
+                tpr_gap=round(float(after["tpr_gap"]), 4) if after["tpr_gap"] is not None else 0.0,
+                fpr_gap=round(float(after["fpr_gap"]), 4) if after["fpr_gap"] is not None else 0.0,
+                dpd=after["dpd"],
+                improvement=improvement,
+                final_score=final_score,
+                description=desc,
+            )
+        )
 
+    best = min(results, key=lambda r: r.bias_score)
     trade_off = (
-        f"Projected bias {before_score} → {bias_after} (↓{improvement} pts, {pct_reduc}% reduction)"
-        f" | DPD: {before_dpd:.4f} → {dpd_after_b:.4f} | Est. Accuracy: {acc_after*100:.1f}%"
+        f"Bias {before_score} → {best.bias_score} | "
+        f"DPD {before_dpd:.4f} → {best.dpd:.4f} | "
+        f"DIR {before_dir:.4f} → {baseline['dir']:.4f} | "
+        f"Accuracy {best.accuracy * 100:.1f}%"
     )
     reason = (
-        f"{best.method.replace('_',' ').title()} selected "
-        f"(rank={best.final_score:.3f}): "
-        f"DPD {before_dpd:.4f} → {dpd_after_b:.4f} (↓{dpd_improv:.4f}), "
-        f"projected bias {before_score} → {bias_after}, "
-        f"est. accuracy {acc_after*100:.1f}%."
+        f"{best.method} selected because it achieved the lowest post-mitigation bias score "
+        f"with observed DPD {best.dpd:.4f} and accuracy {best.accuracy * 100:.1f}%."
     )
 
     return MitigationSummary(
@@ -870,8 +966,8 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
         best_method=best.method,
         best_reason=reason,
         bias_before=before_score,
-        bias_after=bias_after,
-        accuracy_after=acc_after,
+        bias_after=best.bias_score,
+        accuracy_after=best.accuracy,
         trade_off_summary=trade_off,
     )
 
@@ -1176,21 +1272,30 @@ def merge_into_response(stats, ai, root_causes, bias_origin_dict,
 
 async def call_gemini(prompt: str) -> dict:
     if not GEMINI_API_KEY: raise RuntimeError("GEMINI_API_KEY not configured")
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                GEMINI_URL, params={"key": GEMINI_API_KEY},
-                json={"contents": [{"parts": [{"text": prompt}]}],
-                      "generationConfig": {"temperature": 0.0, "maxOutputTokens": 6000}},
-            )
-    except httpx.TransportError as exc:
-        ssl_err = _unwrap_ssl_error(exc)
-        if ssl_err:
-            raise RuntimeError(
-                "Gemini TLS verification failed. If traffic goes through a proxy, set "
-                "GEMINI_API_URL or GEMINI_BASE_URL to a host whose certificate matches."
-            ) from ssl_err
-        raise
+    resp = None
+    for attempt in range(GEMINI_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_AUDIT) as client:
+                resp = await client.post(
+                    GEMINI_URL, params={"key": GEMINI_API_KEY},
+                    json={"contents": [{"parts": [{"text": prompt}]}],
+                          "generationConfig": {"temperature": 0.0, "maxOutputTokens": 6000}},
+                )
+            if resp.status_code == 200:
+                break
+        except httpx.TransportError as exc:
+            ssl_err = _unwrap_ssl_error(exc)
+            if ssl_err:
+                raise RuntimeError(
+                    "Gemini TLS verification failed. If traffic goes through a proxy, set "
+                    "GEMINI_API_URL or GEMINI_BASE_URL to a host whose certificate matches."
+                ) from ssl_err
+            if attempt >= GEMINI_RETRIES:
+                raise
+        if attempt < GEMINI_RETRIES:
+            await asyncio.sleep(0.5 * (attempt + 1))
+    if resp is None:
+        raise RuntimeError("Gemini call failed with no response")
     if resp.status_code != 200:
         raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:400]}")
     cands = resp.json().get("candidates", [])
@@ -1256,6 +1361,7 @@ async def run_chat(request: ChatRequest) -> ChatResponse:
 async def run_audit(request: AuditRequest) -> AuditResponse:
     import traceback
     df = decode_csv(request.dataset)
+    validate_dataset_for_audit(df, request.target_column, request.sensitive_column)
     target_col, sensitive_col, pred_col, _ = detect_columns(
         df, request.target_column, request.sensitive_column, request.prediction_column
     )
@@ -1282,20 +1388,76 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
     root_causes      = generate_root_causes(stats)
     bias_origin_dict = detect_bias_origin(stats)
     mitigation       = run_mitigation(df, c)
-    prompt           = build_prompt(stats, root_causes, reliability_dict)
-    try:
-        ai = await call_gemini(prompt)
-    except Exception as gemini_err:
-        raise RuntimeError(f"Gemini call failed: {gemini_err}")
+    prompt = build_prompt(stats, root_causes, reliability_dict)
+    if request.privacy_mode:
+        ai = {
+            "metric_interpretations": {},
+            "plain_language": {
+                "overall": "Privacy mode enabled: narrative is generated locally and no dataset content is sent to external APIs."
+            },
+            "summary": "Privacy mode was enabled. This audit used local metric computation only.\n\nNo external dataset transmission occurred.\n\nUse audit metrics and recommendations for decision-making.",
+            "key_findings": root_causes[:5] if root_causes else ["No major root causes detected."],
+            "recommendations": [
+                "Review flagged fairness metrics and investigate feature engineering.",
+                "Collect more representative data across protected groups.",
+                "Validate mitigation on a holdout set before deployment.",
+                "Maintain evidence for Article 9/10/13/15 review."
+            ],
+        }
+    else:
+        try:
+            ai = await call_gemini(prompt)
+        except Exception as gemini_err:
+            raise RuntimeError(f"Gemini call failed: {gemini_err}")
 
     # Ensure ai is a dict with expected structure
     if not isinstance(ai, dict):
         ai = {}
 
     try:
-        return merge_into_response(
+        response = merge_into_response(
             stats, ai, root_causes, bias_origin_dict,
             mitigation, stat_test, reliability_dict,
         )
+        computed_metrics_map = {
+            m["key"]: m["value"]
+            for m in c.get("metrics", [])
+            if m.get("value") is not None
+        }
+        compliance_result = evaluate_compliance(computed_metrics_map, {})
+        integrity_hash = compute_audit_integrity_hash(
+            request.dataset,
+            computed_metrics_map,
+            compliance_result,
+        )
+        fairness_grade = (
+            "A" if response.bias_score < 20 else
+            "B" if response.bias_score < 35 else
+            "C" if response.bias_score < 50 else
+            "D" if response.bias_score < 70 else
+            "F"
+        )
+
+        if not request.privacy_mode:
+            input_payload = {
+                "description": request.description,
+                "target_column": request.target_column,
+                "sensitive_column": request.sensitive_column,
+                "sensitive_column_2": request.sensitive_column_2,
+                "prediction_column": request.prediction_column,
+                "privacy_mode": request.privacy_mode,
+            }
+            stored = AUDIT_STORE.save_audit(
+                input_payload=input_payload,
+                metrics=computed_metrics_map,
+                compliance=compliance_result,
+            )
+            response.audit_id = stored["id"]
+
+        response.integrity_hash = integrity_hash
+        response.compliance_result = compliance_result
+        response.fairness_grade = fairness_grade
+        response.privacy_mode = request.privacy_mode
+        return response
     except Exception as merge_err:
         raise RuntimeError(f"Response assembly failed: {merge_err}\n{traceback.format_exc()}")

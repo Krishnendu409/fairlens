@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { decodeShareData, buildShareUrl } from '../api/share'
 import {
@@ -15,6 +15,17 @@ import BadgeModal from '../components/BadgeModal'
 import styles from './AuditResultsPage.module.css'
 
 // ── Metric Card ───────────────────────────────────────────────────────────────
+function getMetricTooltip(metricKey) {
+  const tooltipMap = {
+    demographic_parity_difference: 'Absolute difference in positive outcome rates between groups.',
+    disparate_impact_ratio: 'Ratio of lowest to highest group selection rate. >=0.80 preferred.',
+    theil_index: 'Inequality index across groups; lower is better.',
+    tpr_gap: 'Difference in true positive rates across groups.',
+    fpr_gap: 'Difference in false positive rates across groups.',
+  }
+  return tooltipMap[metricKey] || 'Metric detail'
+}
+
 function MetricCard({ metric, plainLang }) {
   const val = metric.value ?? 0
   const thr = metric.threshold ?? 1
@@ -25,6 +36,9 @@ function MetricCard({ metric, plainLang }) {
     <div className={`${styles.metricCard} ${metric.flagged ? styles.metricFlagged : styles.metricOk}`}>
       <div className={styles.metricHeader}>
         <span className={styles.metricName}>{metric.name}</span>
+        <span title={getMetricTooltip(metric.key)}>
+          ⓘ
+        </span>
         <span className={`${styles.badge} ${metric.flagged ? styles.badgeRed : styles.badgeGreen}`}>
           {metric.flagged ? 'Flagged' : 'OK'}
         </span>
@@ -139,422 +153,83 @@ const TABS = [
 const normalizeGroup = v => v === null || v === undefined ? '' : String(v)
 
 // ── Counterfactual Editor ─────────────────────────────────────────────────────
-// Implements Google WIT-style counterfactual analysis with proper multi-feature
-// scoring — not just a group rate lookup.
-//
-// SCORING METHODOLOGY (inspired by Google's What-If Tool):
-//   Google WIT re-runs the actual model. Since we don't have a deployed model,
-//   we compute an individual-level LOGISTIC SCORE using:
-//     1. A base score from the row's numeric features (z-score → logit → sigmoid)
-//     2. A group disparity multiplier from the audit's observed pass rates
-//   This gives a meaningful per-individual prediction that accounts for ALL
-//   numeric features, not just the group average.
-//
-// LEGAL BASIS:
-//   GDPR Art. 22 + AI Act Art. 86 + CJEU C-203/22 (Dun & Bradstreet Austria):
-//   Individuals subject to automated decisions have the right to a counterfactual
-//   explanation showing how a change in a single attribute would change the outcome.
-//
-// CONSTRAINT: Only the sensitive column value is editable (per user requirement).
-//   Other features are held constant — this is the pure counterfactual fairness
-//   definition: identical in all respects except the protected attribute.
-
-// ── Scoring Engine ────────────────────────────────────────────────────────────
-// Computes feature statistics from all sample rows for normalisation
-function computeFeatureStats(rows, numericCols) {
-  const stats = {}
-  for (const col of numericCols) {
-    const vals = rows.map(r => Number(r[col])).filter(v => !isNaN(v) && isFinite(v))
-    if (vals.length === 0) continue
-    const mean = vals.reduce((a, b) => a + b, 0) / vals.length
-    const variance = vals.reduce((a, v) => a + (v - mean) ** 2, 0) / vals.length
-    const std = Math.sqrt(variance) || 1
-    const min = Math.min(...vals)
-    const max = Math.max(...vals)
-    stats[col] = { mean, std, min, max, range: max - min || 1 }
-  }
-  return stats
-}
-
-// Sigmoid function: maps any real number to [0, 1]
-function sigmoid(x) {
-  return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))))
-}
-
-// Computes per-group feature correlations with the target (pass rate proxy)
-// Returns a weight vector: features with higher group mean in high-pass-rate groups get positive weight
-function computeFeatureWeights(rows, numericCols, sensitiveCol, groupRatesMap) {
-  const normRates = Object.fromEntries(
-    Object.entries(groupRatesMap || {}).map(([k, v]) => [String(k), v])
-  )
-  if (Object.keys(normRates).length < 2) {
-    // No group info — equal weights
-    return Object.fromEntries(numericCols.map(c => [c, 1]))
-  }
-
-  const weights = {}
-  for (const col of numericCols) {
-    // For each group, compute mean of this feature
-    const groupMeans = {}
-    for (const [grp, rate] of Object.entries(normRates)) {
-      const gRows = rows.filter(r => String(r[sensitiveCol]) === grp)
-      const vals = gRows.map(r => Number(r[col])).filter(v => !isNaN(v))
-      if (vals.length > 0) groupMeans[grp] = vals.reduce((a, b) => a + b, 0) / vals.length
-    }
-    // Correlation: do higher group means correlate with higher pass rates?
-    const entries = Object.entries(groupMeans).filter(([g]) => normRates[g] != null)
-    if (entries.length < 2) { weights[col] = 0.5; continue }
-    const rateArr = entries.map(([g]) => normRates[g])
-    const meanArr = entries.map(([, m]) => m)
-    const rBar = rateArr.reduce((a, b) => a + b, 0) / rateArr.length
-    const mBar = meanArr.reduce((a, b) => a + b, 0) / meanArr.length
-    const cov = entries.reduce((s, _entry, i) => s + (rateArr[i] - rBar) * (meanArr[i] - mBar), 0)
-    const varR = rateArr.reduce((s, r) => s + (r - rBar) ** 2, 0)
-    const varM = meanArr.reduce((s, m) => s + (m - mBar) ** 2, 0)
-    const corr = (varR > 0 && varM > 0) ? cov / Math.sqrt(varR * varM) : 0
-    weights[col] = corr  // range [-1, 1]
-  }
-  return weights
-}
-
-// Main scoring function — returns probability in [0, 1] for a given row + group
-// Mirrors the WIT approach of "what would the model predict for this individual"
-function scoreIndividual(row, group, numericCols, featureStats, featureWeights, groupRatesMap) {
-  const normRates = Object.fromEntries(
-    Object.entries(groupRatesMap || {}).map(([k, v]) => [String(k), v])
-  )
-
-  // Step 1: Compute individual feature score (z-score weighted sum → logit space)
-  let featureLogit = 0
-  let weightSum = Math.abs(Object.values(featureWeights).reduce((a, b) => a + Math.abs(b), 0)) || 1
-
-  for (const col of numericCols) {
-    const val = Number(row[col])
-    const stat = featureStats[col]
-    if (isNaN(val) || !stat) continue
-    const z = (val - stat.mean) / stat.std        // z-score
-    const w = (featureWeights[col] || 0) / weightSum
-    featureLogit += z * w * 2.5                   // scale to reasonable logit range
-  }
-
-  // Step 2: Group disparity adjustment
-  // This is the key counterfactual: same individual features, different group
-  const groupRate = normRates[String(group)] ?? 0.5
-  const globalMean = Object.values(normRates).reduce((a, b) => a + b, 0) / Math.max(Object.keys(normRates).length, 1)
-  // Convert group rate to logit offset relative to global mean
-  const groupLogit = Math.log((groupRate + 0.001) / (1 - groupRate + 0.001))
-    - Math.log((globalMean + 0.001) / (1 - globalMean + 0.001))
-
-  // Step 3: Combined logit → sigmoid probability
-  // Feature contribution: 60% (individual merit), group disparity: 40% (bias signal)
-  const totalLogit = featureLogit * 0.6 + groupLogit * 0.4
-
-  return sigmoid(totalLogit)
-}
-
-function CounterfactualEditor({ sampleRows, sensitiveCol, groupRatesMap, allNumericGaps }) {
-  const [selectedRowIndex, setSelectedRowIndex] = useState(0)
+function CounterfactualEditor({ sampleRows, sensitiveCol, groupRatesMap }) {
+  const [selectedRowIndex, setSelectedRowIndex] = useState(null)
   const [editedValue, setEditedValue] = useState('')
-  const [showFeatureDetail, setShowFeatureDetail] = useState(false)
 
-  // Normalize all keys to strings
-  const normalizedRates = Object.fromEntries(
-    Object.entries(groupRatesMap || {}).map(([k, v]) => [String(k), v])
-  )
-  const availableGroups = Object.keys(normalizedRates)
+  if (!sampleRows || sampleRows.length === 0) return <p style={{ color: 'var(--text-muted)' }}>No sample data available for what-if analysis.</p>
 
-  // Detect numeric columns (exclude IDs and the sensitive/target cols)
-  const idPatterns = /^(id|index|row|num|no|number|sno|serial|player_id)$/i
-  const numericCols = sampleRows && sampleRows.length > 0
-    ? Object.keys(sampleRows[0]).filter(k => {
-        if (k === sensitiveCol) return false
-        if (idPatterns.test(k.trim())) return false
-        const vals = sampleRows.map(r => r[k]).filter(v => v != null && v !== '')
-        const numVals = vals.map(Number).filter(v => !isNaN(v))
-        return numVals.length > vals.length * 0.7  // at least 70% numeric
-      })
-    : []
-
-  // Compute feature stats and weights once
-  const featureStats = useMemo(
-    () => computeFeatureStats(sampleRows || [], numericCols),
-    [sampleRows, numericCols.join(',')]
-  )
-
-  // Safe weight computation with try-catch
-  const featureWeights = useMemo(() => {
-    try {
-      return computeFeatureWeights(sampleRows || [], numericCols, sensitiveCol, normalizedRates)
-    } catch { return Object.fromEntries(numericCols.map(c => [c, 0.5])) }
-  }, [sampleRows, numericCols.join(','), sensitiveCol, JSON.stringify(normalizedRates)])
+  const normalizedRates = Object.entries(groupRatesMap || {}).reduce((acc, [k, v]) => {
+    acc[normalizeGroup(k)] = v
+    return acc
+  }, {})
 
   useEffect(() => {
-    if (sampleRows && sampleRows.length > 0 && sensitiveCol) {
-      const v = String(sampleRows[Math.min(selectedRowIndex, sampleRows.length-1)]?.[sensitiveCol] ?? '')
-      setEditedValue(v || availableGroups[0] || '')
+    if (selectedRowIndex === null && sampleRows.length > 0) {
+      const initialValue = normalizeGroup(sampleRows[0][sensitiveCol])
+      setSelectedRowIndex(0)
+      setEditedValue(initialValue)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRowIndex, sampleRows?.length, sensitiveCol])
+  }, [selectedRowIndex, sampleRows, sensitiveCol])
 
-  if (!sampleRows || sampleRows.length === 0 || availableGroups.length < 2) {
-    return (
-      <div className={styles.cfEmptyState}>
-        <p>No sample data available for counterfactual analysis.</p>
-        <p style={{ fontSize: '12px', marginTop: '8px' }}>Ensure the dataset has a sensitive column with at least 2 groups and numeric feature columns.</p>
-      </div>
-    )
-  }
-
-  const activeRow = sampleRows[Math.min(selectedRowIndex, sampleRows.length - 1)]
-  const originalGroup = String(activeRow?.[sensitiveCol] ?? '')
-
-  // Score with original group
-  const origScore = scoreIndividual(activeRow, originalGroup, numericCols, featureStats, featureWeights, normalizedRates)
-  // Score with counterfactual group
-  const cfScore = scoreIndividual(activeRow, editedValue, numericCols, featureStats, featureWeights, normalizedRates)
-
-  const hasChange = editedValue !== originalGroup && editedValue !== ''
-  const diff = hasChange ? (cfScore - origScore) * 100 : 0
-
-  // Feature contributions for selected row
-  const featureContributions = numericCols.map(col => {
-    const val = Number(activeRow[col])
-    const stat = featureStats[col]
-    if (isNaN(val) || !stat) return null
-    const z = (val - stat.mean) / stat.std
-    const w = featureWeights[col] || 0
-    const contribution = z * w  // positive = favours selection
-    return { col, val, z, w, contribution, stat }
-  }).filter(Boolean).sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))
-
-  const maxRate = Math.max(...availableGroups.map(g => normalizedRates[g] || 0), 0.001)
-
-  const diffClass = !hasChange ? styles.cfDiffNeutral
-    : diff > 1 ? styles.cfDiffPositive : diff < -1 ? styles.cfDiffNegative : styles.cfDiffNeutral
-  const diffMsg = !hasChange ? 'Same group — select a different group to see the counterfactual'
-    : diff > 1 ? `+${diff.toFixed(1)}% — more likely to receive a positive outcome`
-    : diff < -1 ? `${diff.toFixed(1)}% — less likely to receive a positive outcome`
-    : 'No meaningful difference between these groups for this individual'
-
-  const cols = Object.keys(sampleRows[0])
+  const activeRow = selectedRowIndex !== null ? sampleRows[selectedRowIndex] : null
+  const originalValue = activeRow ? normalizeGroup(activeRow[sensitiveCol]) : ''
+  
+  const originalRate = originalValue ? normalizedRates[originalValue] : null
+  const newRate = editedValue ? normalizedRates[editedValue] : null
+  const diff = (originalRate != null && newRate != null) ? (newRate - originalRate) * 100 : 0
+  
+  const availableGroups = Object.keys(normalizedRates)
 
   return (
-    <div>
-      {/* EU Legal Context Banner */}
-      <div className={styles.cfEuBanner}>
-        <span className={styles.cfEuIcon}>⚖️</span>
-        <div className={styles.cfEuBannerText}>
-          <span className={styles.cfEuBannerTitle}>EU AI Act Art. 86 + GDPR Art. 22 — Individual Counterfactual Explanations (CJEU C-203/22)</span>
-          <span className={styles.cfEuBannerDesc}>
-            The CJEU (C-203/22, Dun &amp; Bradstreet Austria, 2024) confirmed a right to counterfactual explanations of automated decisions.
-            This tool holds all {numericCols.length > 0 ? `${numericCols.length} numeric features` : 'features'} constant and changes only <strong>{sensitiveCol}</strong> —
-            the pure counterfactual fairness definition. Scores combine individual feature values ({numericCols.length > 0 ? 'weighted by their correlation with the outcome' : 'no numeric features detected'}) with the observed group disparity — not just a group average lookup.
-          </span>
-        </div>
+    <div className={styles.cfContainer}>
+      <div className={styles.cfTableWrap}>
+        <table className={styles.cfTable}>
+          <thead>
+            <tr>
+              {Object.keys(sampleRows[0]).slice(0, 10).map(k => <th key={k}>{k} {k===sensitiveCol?'(S)':''}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {sampleRows.map((row, i) => (
+              <tr key={i} className={selectedRowIndex === i ? styles.cfActiveRow : ''} onClick={() => { setSelectedRowIndex(i); setEditedValue(normalizeGroup(row[sensitiveCol])) }}>
+                {Object.keys(row).slice(0, 10).map(k => <td key={k}>{String(row[k])}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-
-      {/* Group Rate Overview */}
-      <div className={styles.card}>
-        <h3 className={styles.cardTitle}>Group Selection Rates — Observed Disparity (Bias Evidence)</h3>
-        <p className={styles.cardHint}>These group rates drive the counterfactual adjustment. The bar shows each group's historical selection rate from the dataset.</p>
-        <div className={styles.cfGroupBar}>
-          {availableGroups.map(g => {
-            const rate = normalizedRates[g] ?? 0
-            const pct = Math.round(rate * 100)
-            const fillPct = (rate / maxRate) * 100
-            const isMax = rate === maxRate
-            const isMin = rate === Math.min(...availableGroups.map(x => normalizedRates[x] ?? 0))
-            const color = isMax ? 'var(--green)' : isMin ? 'var(--red)' : 'var(--primary)'
-            return (
-              <div key={g} className={styles.cfGroupBarItem}>
-                <span className={styles.cfGroupBarLabel}>{g}</span>
-                <div className={styles.cfGroupBarTrack}>
-                  <div className={styles.cfGroupBarFill} style={{ width: `${fillPct}%`, background: color }} />
-                </div>
-                <span className={styles.cfGroupBarPct} style={{ color }}>{pct}%</span>
-              </div>
-            )
-          })}
-        </div>
-      </div>
-
-      <div className={styles.cfLayout}>
-        {/* Left: Record Table */}
-        <div className={styles.cfTableCard}>
-          <div className={styles.cfTableHeader}>
-            <span>Sample Records — Click to Select Individual</span>
-            <span className={styles.cfTableMeta}>{sampleRows.length} records · <strong style={{color:'var(--primary)'}}>{sensitiveCol}</strong> is protected (S) · {numericCols.length} numeric features used in scoring</span>
+      {activeRow && (
+        <div className={styles.cfEditor}>
+          <h3>Counterfactual Editor</h3>
+          <p>Modify the sensitive attribute <strong>{sensitiveCol}</strong> for this individual to see how the statistical likelihood of a positive outcome changes based on group disparity data.</p>
+          <div className={styles.cfField}>
+            <label>Original {sensitiveCol}:</label>
+            <input disabled value={originalValue} />
           </div>
-          <div className={styles.cfTableScroll}>
-            <table className={styles.cfTable}>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  {cols.slice(0, 7).map(k => (
-                    <th key={k} style={k === sensitiveCol ? {color:'var(--primary)',fontWeight:800} : {}}>
-                      {k}{k === sensitiveCol ? ' (S)' : numericCols.includes(k) ? ' *' : ''}
-                    </th>
-                  ))}
-                  <th style={{color:'var(--primary)',borderLeft:'1px solid var(--border)'}}>Score ▾</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sampleRows.map((row, i) => {
-                  const rowScore = scoreIndividual(row, String(row[sensitiveCol] ?? ''), numericCols, featureStats, featureWeights, normalizedRates)
-                  return (
-                    <tr key={i}
-                      className={selectedRowIndex === i ? styles.cfActiveRow : ''}
-                      onClick={() => setSelectedRowIndex(i)}
-                      style={{ cursor: 'pointer' }}>
-                      <td style={{color:'var(--text-muted)',fontWeight:600}}>{i+1}</td>
-                      {cols.slice(0, 7).map(k => (
-                        <td key={k} style={k === sensitiveCol ? {fontWeight:700,color:'var(--primary)'} : {}}>
-                          {row[k] != null ? String(row[k]) : '—'}
-                        </td>
-                      ))}
-                      <td style={{fontWeight:700,color:rowScore>0.5?'var(--green)':'var(--red)',fontSize:'11px'}}>
-                        {(rowScore*100).toFixed(0)}%
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-            {numericCols.length > 0 && <p style={{fontSize:'10px',color:'var(--text-muted)',padding:'6px 12px',margin:0}}>* = numeric feature used in individual scoring</p>}
+          <div className={styles.cfField}>
+            <label>Counterfactual {sensitiveCol}:</label>
+            <select value={editedValue} onChange={e => setEditedValue(e.target.value)}>
+              {availableGroups.map(g => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </div>
+          <div className={styles.cfResult}>
+            <div className={styles.cfRateBox}>
+              <span>Original Likelihood</span>
+              <strong>{originalRate != null ? (originalRate * 100).toFixed(1) + '%' : 'N/A'}</strong>
+            </div>
+            <div className={styles.cfArrow}>→</div>
+            <div className={styles.cfRateBox}>
+              <span>New Likelihood</span>
+              <strong>{newRate != null ? (newRate * 100).toFixed(1) + '%' : 'N/A'}</strong>
+            </div>
+          </div>
+          <div className={`${styles.cfDiff} ${diff > 0 ? styles.cfDiffUp : diff < 0 ? styles.cfDiffDown : ''}`}>
+             Difference: {diff > 0 ? '+' : ''}{diff.toFixed(1)}% 
+             {diff !== 0 && (diff > 0 ? ' (More likely to pass)' : ' (Less likely to pass)')}
           </div>
         </div>
-
-        {/* Right: Editor */}
-        <div className={styles.cfEditorCard}>
-          <div className={styles.cfEditorHeader}>
-            <Icon name="simulation" size={14} />
-            <span className={styles.cfEditorTitle}>Counterfactual Editor · Row {selectedRowIndex + 1}</span>
-          </div>
-          <div className={styles.cfEditorBody}>
-            {/* Row snapshot */}
-            <div>
-              <p style={{fontSize:'11px',fontWeight:600,color:'var(--text-muted)',marginBottom:'6px',textTransform:'uppercase',letterSpacing:'0.05em'}}>Selected Record</p>
-              <div className={styles.cfRowPreview}>
-                <div className={styles.cfRowPreviewGrid}>
-                  {cols.slice(0, 8).map(k => (
-                    <div key={k} className={styles.cfRowPreviewItem}>
-                      <span className={styles.cfRowPreviewKey}>{k}:</span>
-                      <span className={styles.cfRowPreviewVal}
-                        style={k === sensitiveCol ? {color:'var(--primary)',fontWeight:700} : {}}>
-                        {activeRow[k] != null ? String(activeRow[k]) : '—'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Group selector */}
-            <div className={styles.cfSelectSection}>
-              <span className={styles.cfSelectLabel}>
-                Change <em style={{color:'var(--primary)'}}>{sensitiveCol}</em> to…
-              </span>
-              <span className={styles.cfSelectDesc}>
-                Original: <strong>{originalGroup}</strong>. Select a counterfactual group. All other {numericCols.length} feature values remain constant (pure counterfactual fairness).
-              </span>
-              <select className={styles.cfSelect} value={editedValue} onChange={e => setEditedValue(e.target.value)}>
-                {availableGroups.map(g => (
-                  <option key={g} value={g}>{g}{g === originalGroup ? ' (current)' : ''}</option>
-                ))}
-              </select>
-            </div>
-
-            {/* Outcome comparison */}
-            <div>
-              <p style={{fontSize:'11px',fontWeight:600,color:'var(--text-muted)',marginBottom:'8px',textTransform:'uppercase',letterSpacing:'0.05em'}}>
-                Individual Predicted Outcome Likelihood
-                <span style={{fontWeight:400,color:'var(--text-muted)',fontSize:'10px',display:'block',textTransform:'none',letterSpacing:0,marginTop:'2px'}}>
-                  Combines individual feature values + group disparity signal
-                </span>
-              </p>
-              <div className={styles.cfComparisonGrid}>
-                <div className={styles.cfRateCardOrig}>
-                  <span className={styles.cfRateLabel}>Original</span>
-                  <span className={styles.cfRateGroup}>{originalGroup}</span>
-                  <span className={styles.cfRateNum}>{(origScore * 100).toFixed(1)}%</span>
-                  <div className={styles.cfRateBar}>
-                    <div className={styles.cfRateFill} style={{width:`${origScore*100}%`,background:'var(--text-muted)'}}/>
-                  </div>
-                </div>
-                <div className={styles.cfArrowBig}>→</div>
-                <div className={styles.cfRateCardNew}
-                  style={{borderColor: hasChange ? (diff > 1 ? 'rgba(74,222,128,0.4)' : diff < -1 ? 'rgba(248,113,113,0.4)' : 'var(--border)') : 'var(--border)'}}>
-                  <span className={styles.cfRateLabel}>Counterfactual</span>
-                  <span className={styles.cfRateGroup}
-                    style={{background: hasChange ? (diff > 1 ? 'rgba(74,222,128,0.12)' : diff < -1 ? 'rgba(248,113,113,0.12)' : 'var(--surface2)') : 'var(--surface2)'}}>
-                    {editedValue || originalGroup}
-                  </span>
-                  <span className={styles.cfRateNum}
-                    style={{color: !hasChange ? 'var(--text)' : diff > 1 ? 'var(--green)' : diff < -1 ? 'var(--red)' : 'var(--text)'}}>
-                    {(cfScore * 100).toFixed(1)}%
-                  </span>
-                  <div className={styles.cfRateBar}>
-                    <div className={styles.cfRateFill}
-                      style={{width:`${cfScore*100}%`,background: diff > 1 ? 'var(--green)' : diff < -1 ? 'var(--red)' : 'var(--primary)'}}/>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Diff card */}
-            <div className={`${styles.cfDiffCard} ${diffClass}`}>
-              <div>{diffMsg}</div>
-              {hasChange && Math.abs(diff) > 1 && (
-                <div className={styles.cfDiffSubtext}>
-                  This {diff > 0 ? 'advantage' : 'disadvantage'} is driven by group membership — holding all {numericCols.length} feature values constant.
-                </div>
-              )}
-            </div>
-
-            {/* Feature Contributions */}
-            {numericCols.length > 0 && featureContributions.length > 0 && (
-              <div>
-                <button
-                  onClick={() => setShowFeatureDetail(x => !x)}
-                  style={{fontSize:'11px',color:'var(--primary)',fontWeight:600,background:'none',border:'none',cursor:'pointer',padding:'0',textAlign:'left'}}>
-                  {showFeatureDetail ? '▼' : '▶'} Feature contributions for this individual ({featureContributions.length} features)
-                </button>
-                {showFeatureDetail && (
-                  <div style={{marginTop:'8px',display:'flex',flexDirection:'column',gap:'4px'}}>
-                    {featureContributions.slice(0, 8).map(fc => {
-                      const absMax = Math.max(...featureContributions.map(x => Math.abs(x.contribution)), 0.001)
-                      const barW = Math.min(Math.abs(fc.contribution) / absMax * 100, 100)
-                      const isPos = fc.contribution > 0
-                      return (
-                        <div key={fc.col} style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'11px'}}>
-                          <span style={{width:'100px',color:'var(--text)',fontWeight:500,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{fc.col}</span>
-                          <span style={{width:'42px',textAlign:'right',color:'var(--text-muted)',flexShrink:0}}>{fc.val.toFixed(1)}</span>
-                          <div style={{flex:1,height:'6px',background:'var(--border)',borderRadius:'3px',overflow:'hidden'}}>
-                            <div style={{height:'100%',width:`${barW}%`,background:isPos?'var(--green)':'var(--red)',borderRadius:'3px',marginLeft:isPos?'0':'auto'}}/>
-                          </div>
-                          <span style={{width:'40px',color:isPos?'var(--green)':'var(--red)',fontWeight:600,textAlign:'right',flexShrink:0}}>
-                            {isPos?'+':''}{(fc.contribution*100).toFixed(0)}
-                          </span>
-                        </div>
-                      )
-                    })}
-                    <p style={{fontSize:'10px',color:'var(--text-muted)',margin:'4px 0 0'}}>
-                      Bar width = feature importance × z-score for this individual. Green = favours selection. Values weighted by correlation with outcome across groups.
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* EU legal note */}
-            <div className={styles.cfLegalNote}>
-              <strong>GDPR Art. 22 &amp; AI Act Art. 86 (CJEU C-203/22):</strong> This individual has the right to receive this counterfactual explanation on request.
-              The {Math.abs(diff).toFixed(1)}% {diff !== 0 && hasChange ? (diff > 0 ? 'advantage' : 'disadvantage') : 'difference'} shown above
-              {Math.abs(diff) > 5 ? ' may constitute evidence of indirect discrimination under EU Charter Art. 21.' : ' is within acceptable tolerance under current EU guidance.'}
-            </div>
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -567,6 +242,7 @@ export default function AuditResultsPage() {
   const [shareState, setShareState] = useState('idle')
   const [exporting, setExporting] = useState(false)
   const [showBadgeModal, setShowBadgeModal] = useState(false)
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState('')
   const [searchParams] = useSearchParams()
 
   let result, datasetDescription
@@ -610,6 +286,10 @@ export default function AuditResultsPage() {
     plain_language = {},
     sample_rows = [],
     group_rates_map = {},
+    fairness_grade,
+    privacy_mode,
+    integrity_hash,
+    compliance_result,
   } = result
 
   const scoreColor = bias_score < 20 ? '#4ade80' : bias_score < 45 ? '#fbbf24' : bias_score < 70 ? '#f97316' : '#f87171'
@@ -659,7 +339,10 @@ export default function AuditResultsPage() {
 
   async function handleExport() {
     setExporting(true)
-    try { await exportAuditToPdf(result, datasetDescription) } finally { setExporting(false) }
+    try {
+      const out = await exportAuditToPdf(result, datasetDescription)
+      if (out?.url) setPdfPreviewUrl(out.url)
+    } finally { setExporting(false) }
   }
 
   const tabBadges = {
@@ -721,6 +404,16 @@ export default function AuditResultsPage() {
                 <div className={styles.riskBadge} style={{ background: scoreColor + '22', color: scoreColor, borderColor: scoreColor + '55' }}>
                   {risk_label}
                 </div>
+                {fairness_grade && (
+                  <div className={styles.riskBadge} style={{ marginTop: 8 }}>
+                    Fairness Grade: {fairness_grade}
+                  </div>
+                )}
+                {privacy_mode && (
+                  <div className={styles.riskBadge} style={{ marginTop: 8 }}>
+                    Privacy Mode Enabled
+                  </div>
+                )}
                 <h1 className={styles.summaryTitle}>{bias_level} Bias Detected</h1>
                 <p className={styles.summaryMeta}>
                   {total_rows?.toLocaleString()} rows · {columns?.length} columns ·
@@ -923,6 +616,13 @@ export default function AuditResultsPage() {
             <h3 className={styles.subTitle}>All Fairness Metrics</h3>
             <div className={styles.metricsGrid}>
               {metrics.map(m => <MetricCard key={m.key} metric={m} plainLang={plain_language[m.key]}/>)}
+            </div>
+            <div className={styles.card}>
+              <h3 className={styles.cardTitle}>Compliance Engine Output</h3>
+              <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-muted)' }}>
+                {JSON.stringify(compliance_result || {}, null, 2)}
+              </pre>
+              {integrity_hash && <p><strong>Integrity Hash:</strong> {integrity_hash}</p>}
             </div>
 
             {group_stats.length > 0 && (
@@ -1223,12 +923,11 @@ export default function AuditResultsPage() {
         {/* ══ WHAT-IF EXPERIMENTS ══ */}
         {activeTab === 'whatif' && (
           <div className={styles.tabContent}>
-            <h2 className={styles.tabTitle}>What-If / Counterfactual Analysis</h2>
+            <h2 className={styles.tabTitle}>Counterfactual Row Editor</h2>
             <p className={styles.tabDesc}>
-              Select any real record and change its <strong>{sensitive_column}</strong> value to see how that individual's statistical outcome likelihood would change —
-              a direct implementation of GDPR Art. 22 counterfactual explanation rights confirmed by CJEU C-203/22.
+              Select a real record from your dataset and modify its sensitive attributes string to simulate counterfactual fairness decisions based on historical group bias.
             </p>
-            <CounterfactualEditor sampleRows={sample_rows} sensitiveCol={sensitive_column} groupRatesMap={group_rates_map} allNumericGaps={all_numeric_gaps} />
+            <CounterfactualEditor sampleRows={sample_rows} sensitiveCol={sensitive_column} groupRatesMap={group_rates_map} />
           </div>
         )}
 
@@ -1284,54 +983,35 @@ export default function AuditResultsPage() {
               <div className={styles.formulaBox}>
                 <p style={{whiteSpace: 'pre-wrap'}}>{has_predictions
                   ? [
-                      '── Model-based mode (prediction column present) ────────────────',
+                      'bias_score = (0.40 x dpd_v + 0.25 x dir_v + 0.20 x tpr_v + 0.15 x fpr_v) x 100',
                       '',
-                      'bias_score = mean([dpd_v, dir_v, tpr_v, fpr_v]) × 100',
-                      '           = 4 violations averaged equally',
-                      '',
-                      'dpd_v = min(DPD / 0.10, 1.0)',
-                      '        where DPD = max(pass_rates) - min(pass_rates)',
-                      '        Flagged if DPD > 0.10',
-                      '',
-                      'dir_v = 0                          if DIR >= 0.80  (EU 4/5 rule — passing)',
-                      '      = min((0.80 - DIR) / 0.80, 1)  if DIR < 0.80   (EU 4/5 rule — failing)',
-                      '        where DIR = min(pass_rates) / max(pass_rates)',
-                      '',
-                      'tpr_v = min(TPR_gap / 0.10, 1.0)   [Equal Opportunity — requires predictions]',
-                      'fpr_v = min(FPR_gap / 0.10, 1.0)   [Equalized Odds — requires predictions]',
-                      '',
-                      '── Thresholds ─────────────────────────────────────────────────',
-                      'DPD threshold  : < 0.10   (EU best practice)',
-                      'DIR threshold  : >= 0.80  (EU 4/5 / 80% rule)',
-                      'TPR/FPR thresh : < 0.10   (equal opportunity standard)',
+                      'dpd_v = graduated curve (not hard cap):',
+                      '  DPD <= 0.10 : dpd_v = DPD / 0.10 x 0.75    (0.05 -> 0.375, 0.10 -> 0.75)',
+                      '  DPD >  0.10 : dpd_v = 0.75 + 0.25 x sqrt((DPD - 0.10) / 0.90)',
+                      '                        (0.20 -> 0.88, 0.40 -> 0.94, 1.0 -> 1.0)',
+                      'dir_v = 0 if DIR >= 0.80 else min((0.80 - DIR) / 0.80, 1)   [legal 4/5 rule]',
+                      'tpr_v = same graduated curve scaled to 0.10 threshold        [Equal Opportunity]',
+                      'fpr_v = same graduated curve scaled to 0.10 threshold        [Equalized Odds]',
                     ].join('\n')
                   : [
-                      '── Label-only mode (no prediction column) ───────────────────────',
+                      'bias_score = (0.60 x dpd_v + 0.40 x dir_v) x 100',
                       '',
-                      'bias_score = mean([dpd_v, dir_v]) × 100',
-                      '           = 2 violations averaged equally',
+                      'dpd_v = graduated curve (not hard cap):',
+                      '  DPD <= 0.10 : dpd_v = DPD / 0.10 x 0.75    (0.05 -> 0.375, 0.10 -> 0.75)',
+                      '  DPD >  0.10 : dpd_v = 0.75 + 0.25 x sqrt((DPD - 0.10) / 0.90)',
+                      '                        (0.20 -> 0.88, 0.40 -> 0.94, 1.0 -> 1.0)',
+                      'dir_v = 0 if DIR >= 0.80 else min((0.80 - DIR) / 0.80, 1)   [legal 4/5 rule]',
                       '',
-                      'dpd_v = min(DPD / 0.10, 1.0)',
-                      '        where DPD = max(pass_rates) - min(pass_rates)',
-                      '        Flagged if DPD > 0.10',
-                      '',
-                      'dir_v = 0                          if DIR >= 0.80  (EU 4/5 rule — passing)',
-                      '      = min((0.80 - DIR) / 0.80, 1)  if DIR < 0.80   (EU 4/5 rule — failing)',
-                      '        where DIR = min(pass_rates) / max(pass_rates)',
-                      '',
-                      'TPR/FPR: NOT computed — no prediction column provided.',
-                      'Add a prediction column to enable Equal Opportunity & Equalized Odds metrics.',
-                      '',
-                      '── Thresholds ─────────────────────────────────────────────────',
-                      'DPD threshold  : < 0.10   (EU best practice)',
-                      'DIR threshold  : >= 0.80  (EU 4/5 / 80% rule)',
+                      'DPD weighted 0.60 (primary metric), DIR weighted 0.40 (legal dimension).',
+                      'Weighted not averaged -- avoids double-counting the same disparity.',
+                      'Graduated curve -- DPD=0.11 and DPD=0.80 score differently (no hard cap).',
+                      'TPR/FPR excluded: no prediction column (label-only mode).',
                     ].join('\n')
                 }</p>
                 <p className={styles.formulaNote}>
-                  All fairness metrics computed in Python (audit_service.py). Gemini 2.5 Flash writes narrative text only — it never modifies numeric results.
-                  Theil index uses group-level rate formula: mean((r/mean_r)·ln(r/mean_r)). Performance gap normalised to column range.
-                  Chi-square + Cramér&apos;s V: V&lt;0.10 negligible · 0.10–0.20 small · 0.20–0.40 medium · ≥0.40 large effect size.
-                  Bias score range: 0–19 = Low · 20–44 = Moderate · 45–69 = High · 70–100 = Critical.
+                  All metrics computed in Python. Gemini writes narrative text only.
+                  Theil uses population-weighted formula. Performance gap normalised to column range.
+                  Chi-square + Cramer&apos;s V: V&lt;0.10 negligible, 0.10-0.20 small, 0.20-0.40 medium, &gt;=0.40 large.
                 </p>
               </div>
             </div>
@@ -1349,6 +1029,12 @@ export default function AuditResultsPage() {
                 ))}
               </div>
             </div>
+            {pdfPreviewUrl && (
+              <div className={styles.card}>
+                <h3 className={styles.cardTitle}>PDF Preview</h3>
+                <iframe title="Compliance PDF preview" src={pdfPreviewUrl} style={{ width: '100%', height: 500, border: '1px solid var(--border)' }} />
+              </div>
+            )}
           </div>
         )}
 

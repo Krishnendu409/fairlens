@@ -6,6 +6,7 @@ Called by analyse_route.py — never directly by external requests.
 
 import os
 import ssl
+import asyncio
 import httpx
 from dotenv import load_dotenv
 
@@ -43,9 +44,44 @@ def _unwrap_ssl_error(exc: Exception) -> ssl.SSLCertVerificationError | None:
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_URL = _build_gemini_url()
+GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "60"))
+GEMINI_RETRIES = int(os.getenv("GEMINI_RETRIES", "2"))
+
+
+def _local_privacy_analysis(prompt: str, response: str) -> AnalyseResponse:
+    lowered = response.lower()
+    flagged = []
+    keywords = [
+        "men are better",
+        "women are better",
+        "naturally suited",
+        "inferior",
+        "superior",
+        "race",
+        "religion",
+        "disabled",
+    ]
+    for phrase in keywords:
+        if phrase in lowered:
+            flagged.append(phrase)
+    bias_score = min(95.0, float(len(flagged) * 15))
+    bias_level = determine_bias_level(bias_score)
+    categories = [BiasCategory(name="Stereotyping", score=min(100.0, bias_score))]
+    return AnalyseResponse(
+        bias_score=bias_score,
+        bias_level=bias_level,
+        confidence=65.0,
+        categories=categories,
+        explanation="Privacy mode: local heuristic analysis was used and no external AI API was called.",
+        unbiased_response=response if not flagged else "Please provide a neutral, stereotype-free response grounded in evidence.",
+        flagged_phrases=flagged,
+    )
 
 
 async def run_analysis(request: AnalyseRequest) -> AnalyseResponse:
+    if request.privacy_mode:
+        return _local_privacy_analysis(request.prompt, request.ai_response)
+
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not set in environment variables.")
 
@@ -54,26 +90,36 @@ async def run_analysis(request: AnalyseRequest) -> AnalyseResponse:
     payload = {
         "contents": [{"parts": [{"text": gemini_prompt}]}],
         "generationConfig": {
-            "temperature": 0.1,
+            "temperature": 0.0,
             "maxOutputTokens": 8192,
         },
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                GEMINI_URL,
-                params={"key": GEMINI_API_KEY},
-                json=payload,
-            )
-    except httpx.TransportError as exc:
-        ssl_err = _unwrap_ssl_error(exc)
-        if ssl_err:
-            raise RuntimeError(
-                "Gemini TLS verification failed. Set GEMINI_API_URL or GEMINI_BASE_URL "
-                "to a reachable host whose certificate matches."
-            ) from ssl_err
-        raise
+    response = None
+    for attempt in range(GEMINI_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    GEMINI_URL,
+                    params={"key": GEMINI_API_KEY},
+                    json=payload,
+                )
+            if response.status_code == 200:
+                break
+        except httpx.TransportError as exc:
+            ssl_err = _unwrap_ssl_error(exc)
+            if ssl_err:
+                raise RuntimeError(
+                    "Gemini TLS verification failed. Set GEMINI_API_URL or GEMINI_BASE_URL "
+                    "to a reachable host whose certificate matches."
+                ) from ssl_err
+            if attempt >= GEMINI_RETRIES:
+                raise
+        if attempt < GEMINI_RETRIES:
+            await asyncio.sleep(0.5 * (attempt + 1))
+
+    if response is None:
+        raise RuntimeError("Gemini request failed with no response")
 
     if response.status_code != 200:
         raise RuntimeError(

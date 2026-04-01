@@ -5,6 +5,7 @@ from typing import List
 class AnalyseRequest(BaseModel):
     prompt: str
     ai_response: str
+    privacy_mode: bool = False
 
 
 class BiasCategory(BaseModel):
