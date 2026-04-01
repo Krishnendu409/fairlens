@@ -437,7 +437,6 @@ export async function exportAuditToPdf(result, description, options = {}) {
   const gaps = criticalGaps(compliance)
   const complianceEval = result?.compliance || {}
   const gapMatrix = Array.isArray(complianceEval.gap_matrix) ? complianceEval.gap_matrix : []
-  const complianceRating = complianceEval.compliance_rating || null
   const remainingControls = Array.isArray(complianceEval.remaining_controls) ? complianceEval.remaining_controls : []
 
   // ── Metrics convenience ─────────────────────────────────────────────────────
@@ -866,23 +865,10 @@ export async function exportAuditToPdf(result, description, options = {}) {
     'If this system is confirmed as high-risk under Annex III: (1) A full Article 9 risk management system must be established; (2) An Article 17 quality management system must be implemented; (3) An Article 43 conformity assessment must be completed before deployment; (4) The system must be registered in the EU AI database under Article 71; (5) CE marking is required (Art. 48); (6) Technical documentation must be retained for 10 years (Art. 18).',
     y, C.red, 34)
 
-  // Dedicated article-by-article gap matrix and 1–10 compliance rating
+  // Dedicated article-by-article gap matrix
   if (gapMatrix.length > 0) {
-    y = sectionHeader(doc, '4A', 'EU AI Act Dedicated Gap Matrix & Compliance Rating',
+    y = sectionHeader(doc, '4A', 'EU AI Act Dedicated Gap Matrix',
       'Article-by-article matrix: Art. 9/10/11/12/13/14/15/17/19/72 + Annex IV', y)
-
-    if (complianceRating) {
-      const score = Number(complianceRating.score_1_to_10 || 0)
-      const color = score >= 8 ? C.green : score >= 6 ? C.amber : C.red
-      y = alertBox(
-        doc,
-        `EU COMPLIANCE RATING: ${score.toFixed(1)}/10 — ${s(complianceRating.label || 'Unrated')}`,
-        `${s(complianceRating.rationale || '')} Method: ${s(complianceRating.method || '')}`,
-        y,
-        color,
-        28
-      )
-    }
 
     const matrixRows = gapMatrix.map(row => ([
       { text: s(row.article), bold: true },

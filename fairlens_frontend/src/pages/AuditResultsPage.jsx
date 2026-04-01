@@ -1469,12 +1469,6 @@ export default function AuditResultsPage() {
             {Array.isArray(compliance?.gap_matrix) && compliance.gap_matrix.length > 0 && (
               <div className={styles.card}>
                 <h3 className={styles.cardTitle}>EU AI Act Gap Matrix (Dedicated)</h3>
-                {compliance?.compliance_rating && (
-                  <p className={styles.cardHint}>
-                    Compliance Rating: <strong>{Number(compliance.compliance_rating.score_1_to_10).toFixed(1)}/10</strong> — {compliance.compliance_rating.label}
-                    {' · '}{compliance.compliance_rating.rationale}
-                  </p>
-                )}
                 <div className={styles.tableWrap}>
                   <table className={styles.table}>
                     <thead>
