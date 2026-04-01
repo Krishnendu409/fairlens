@@ -90,6 +90,65 @@ DOMAIN_METHOD_POLICY = {
     "general": "reweighing",
 }
 
+DOMAIN_POLICY_MATRIX = {
+    "hr_employment": {
+        "harm_type": "allocation",
+        "fairness_priority": ["demographic_parity", "disparate_impact"],
+        "metric_thresholds": {"dpd_max": 0.10, "dir_min": 0.80, "tpr_gap_max": 0.10, "fpr_gap_max": 0.10},
+        "mitigation_priority": ["reweighing", "threshold_optimisation", "disparate_impact_remover", "reject_option_classification"],
+        "caveats": "Selection and promotion decisions should minimise allocation disparity and preserve explainability.",
+        "references": ["EU Charter Art. 21", "EU AI Act Art. 10", "EEOC UGESP 4/5 rule"],
+    },
+    "finance_credit": {
+        "harm_type": "allocation",
+        "fairness_priority": ["disparate_impact", "equal_opportunity"],
+        "metric_thresholds": {"dpd_max": 0.10, "dir_min": 0.80, "tpr_gap_max": 0.10, "fpr_gap_max": 0.10},
+        "mitigation_priority": ["threshold_optimisation", "reweighing", "disparate_impact_remover", "reject_option_classification"],
+        "caveats": "Credit access decisions require balancing parity constraints with calibration and denial-error control.",
+        "references": ["ECOA/FHA disparate impact doctrine", "EU AI Act Art. 9/10", "80% rule practice"],
+    },
+    "healthcare": {
+        "harm_type": "quality_of_service",
+        "fairness_priority": ["equal_opportunity", "equalized_odds"],
+        "metric_thresholds": {"dpd_max": 0.10, "dir_min": 0.80, "tpr_gap_max": 0.10, "fpr_gap_max": 0.10},
+        "mitigation_priority": ["reject_option_classification", "threshold_optimisation", "reweighing", "disparate_impact_remover"],
+        "caveats": "Clinical triage should reduce error-rate disparities and avoid under-serving high-risk groups.",
+        "references": ["WHO ethics guidance", "EU AI Act Art. 9", "equalized odds literature"],
+    },
+    "education": {
+        "harm_type": "allocation",
+        "fairness_priority": ["demographic_parity", "equal_opportunity"],
+        "metric_thresholds": {"dpd_max": 0.10, "dir_min": 0.80, "tpr_gap_max": 0.10, "fpr_gap_max": 0.10},
+        "mitigation_priority": ["reweighing", "threshold_optimisation", "disparate_impact_remover", "reject_option_classification"],
+        "caveats": "Admissions and scholarship allocation should mitigate historic exclusion while maintaining consistency.",
+        "references": ["EU Charter Art. 14/21", "OECD AI fairness principles"],
+    },
+    "justice_public_safety": {
+        "harm_type": "quality_of_service",
+        "fairness_priority": ["equalized_odds", "equal_opportunity"],
+        "metric_thresholds": {"dpd_max": 0.10, "dir_min": 0.80, "tpr_gap_max": 0.10, "fpr_gap_max": 0.10},
+        "mitigation_priority": ["reject_option_classification", "threshold_optimisation", "reweighing", "disparate_impact_remover"],
+        "caveats": "Public-safety risk systems should prioritize error-rate parity to reduce harmful false positives/negatives.",
+        "references": ["EU AI Act high-risk regime", "FAT/ML justice guidance", "equalized odds literature"],
+    },
+    "sports_selection": {
+        "harm_type": "allocation",
+        "fairness_priority": ["demographic_parity", "disparate_impact"],
+        "metric_thresholds": {"dpd_max": 0.10, "dir_min": 0.80, "tpr_gap_max": 0.10, "fpr_gap_max": 0.10},
+        "mitigation_priority": ["threshold_optimisation", "reweighing", "disparate_impact_remover", "reject_option_classification"],
+        "caveats": "Selection trials should minimise access disparity while preserving valid performance signals.",
+        "references": ["IOC inclusion guidance", "80% rule practice"],
+    },
+    "general": {
+        "harm_type": "allocation",
+        "fairness_priority": ["demographic_parity", "disparate_impact"],
+        "metric_thresholds": {"dpd_max": 0.10, "dir_min": 0.80, "tpr_gap_max": 0.10, "fpr_gap_max": 0.10},
+        "mitigation_priority": ["reweighing", "threshold_optimisation", "disparate_impact_remover", "reject_option_classification"],
+        "caveats": "Use conservative parity-first defaults when domain evidence is weak.",
+        "references": ["EU AI Act Art. 9/10", "OECD AI Principles"],
+    },
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NUMPY SERIALISATION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -798,6 +857,7 @@ def _scenario_aware_method_selection(
         df, computed, dataset_description
     )
     selected_method = DOMAIN_METHOD_POLICY.get(scenario, "reweighing")
+    policy_profile = DOMAIN_POLICY_MATRIX.get(scenario, DOMAIN_POLICY_MATRIX["general"])
     reason = (
         f"Dataset domain scenario '{scenario}' detected "
         f"(confidence={scenario_confidence:.2f}) using dataset description/columns; "
@@ -815,8 +875,51 @@ def _scenario_aware_method_selection(
         "scenario_confidence": scenario_confidence,
         "scenario_evidence": scenario_evidence,
         "scenario_source": "dataset_description_and_columns",
+        "policy_profile": policy_profile,
     }
     return selected_method, reason, context
+
+
+def _metric_override_selection(
+    *,
+    computed: dict,
+    policy_profile: dict,
+    policy_selected_method: str,
+) -> tuple[str, Optional[str], dict]:
+    dpd = float(computed.get("dpd", 0.0))
+    dir_raw = computed.get("dir_", None)
+    dir_val = float(dir_raw) if dir_raw is not None else None
+    tpr_gap = computed.get("tpr_gap")
+    fpr_gap = computed.get("fpr_gap")
+    has_predictions = bool(computed.get("has_predictions", False))
+    thresholds = policy_profile.get("metric_thresholds", {})
+
+    gates = {
+        "dpd_severe": dpd > max(float(thresholds.get("dpd_max", 0.10)) * 1.5, 0.15),
+        "dir_critical": (dir_val is not None and dir_val < min(float(thresholds.get("dir_min", 0.80)) - 0.10, 0.70)),
+        "tpr_gap_severe": bool(has_predictions and tpr_gap is not None and float(tpr_gap) > max(float(thresholds.get("tpr_gap_max", 0.10)) * 1.5, 0.15)),
+        "fpr_gap_severe": bool(has_predictions and fpr_gap is not None and float(fpr_gap) > max(float(thresholds.get("fpr_gap_max", 0.10)) * 1.5, 0.15)),
+    }
+
+    override_method = None
+    override_reason = None
+    if gates["tpr_gap_severe"] or gates["fpr_gap_severe"]:
+        override_method = "reject_option_classification"
+        override_reason = "Metric gate override: severe TPR/FPR gap prioritizes error-rate parity."
+    elif gates["dpd_severe"] and not gates["dir_critical"]:
+        override_method = "threshold_optimisation"
+        override_reason = "Metric gate override: severe DPD requires stronger threshold balancing."
+    elif gates["dir_critical"]:
+        override_method = "disparate_impact_remover"
+        override_reason = "Metric gate override: critical DIR violation prioritizes disparate impact repair."
+
+    final_method = override_method or policy_selected_method
+    return final_method, override_reason, {
+        "metric_triggers": gates,
+        "override_applied": bool(override_method is not None),
+        "override_method": override_method,
+        "override_reason": override_reason,
+    }
 
 
 def _project_trade_off_note(before_dpd: float, after_dpd: float, before_acc: Optional[float], after_acc: Optional[float]) -> str:
@@ -1186,9 +1289,41 @@ def run_mitigation(
         "reject_option_classification":  0.91,
     }
 
-    selected_method, selection_reason, selection_context = _scenario_aware_method_selection(
+    policy_selected_method, selection_reason, selection_context = _scenario_aware_method_selection(
         df, computed, dataset_description
     )
+    policy_profile = selection_context.get("policy_profile", DOMAIN_POLICY_MATRIX["general"])
+    selected_method, metric_override_reason, override_context = _metric_override_selection(
+        computed=computed,
+        policy_profile=policy_profile,
+        policy_selected_method=policy_selected_method,
+    )
+    decision_trace = [
+        {
+            "layer": "scenario_policy",
+            "scenario": selection_context.get("scenario"),
+            "confidence": selection_context.get("scenario_confidence"),
+            "evidence": selection_context.get("scenario_evidence", []),
+            "policy_selected_method": policy_selected_method,
+            "reason": selection_reason,
+        },
+        {
+            "layer": "metric_gate",
+            "metric_triggers": override_context.get("metric_triggers", {}),
+            "override_applied": override_context.get("override_applied", False),
+            "override_method": override_context.get("override_method"),
+            "override_reason": override_context.get("override_reason"),
+            "final_method": selected_method,
+        },
+    ]
+    selection_context = {
+        **selection_context,
+        **override_context,
+        "policy_selected_method": policy_selected_method,
+        "final_selected_method": selected_method,
+        "final_selection_source": "metric_override" if override_context.get("override_applied") else "scenario_policy",
+        "decision_trace": decision_trace,
+    }
 
     raw_results = [
         _method_reweighing(df, computed),
@@ -1267,6 +1402,13 @@ def run_mitigation(
             method_type=method_type,
             scenario_reason=selection_reason if method == selected_method else None,
             selected_by_scenario=bool(method == selected_method),
+            selected_by_policy=bool(method == policy_selected_method),
+            selected_by_metric_override=bool(method == selected_method and override_context.get("override_applied")),
+            selection_badge=(
+                "metric-overridden"
+                if method == selected_method and override_context.get("override_applied")
+                else ("policy-selected" if method == selected_method else None)
+            ),
             bias_score=round(proj_bias, 1),
             accuracy=round(acc, 4),
             precision=round(float(prec), 4) if prec is not None else None,
@@ -1331,8 +1473,10 @@ def run_mitigation(
         f"{acc_fragment} "
         f"{fair_msg} No method guarantees perfect fairness."
     )
+    final_source = "metric override" if override_context.get("override_applied") else "scenario policy"
+    source_reason = metric_override_reason if override_context.get("override_applied") else selection_reason
     reason = (
-        f"{best.method.replace('_',' ').title()} selected via scenario-aware policy. {selection_reason} "
+        f"{best.method.replace('_',' ').title()} selected via {final_source}. {source_reason} "
         f"(rank={best.final_score:.3f}): "
         f"DPD {before_dpd:.4f} → {dpd_after_b:.4f} (↓{dpd_improv:.4f}), "
         f"projected bias {before_score} → {bias_after}, "
@@ -1345,8 +1489,12 @@ def run_mitigation(
         best_method=best.method,
         best_reason=reason,
         selected_method=selected_method,
-        selection_reason=selection_reason,
+        selection_reason=source_reason,
         selection_context=selection_context,
+        policy_selected_method=policy_selected_method,
+        metric_override_method=override_context.get("override_method"),
+        final_selection_source=selection_context.get("final_selection_source"),
+        decision_trace=decision_trace,
         bias_before=before_score,
         bias_after=bias_after,
         accuracy_after=acc_after,
