@@ -531,8 +531,8 @@ Formula: mean({[round(v*100,1) for v in violations]}) = {bias_score}"""
             "avg_gap":        avg_gap,
             "theil":          theil,
             "score_breakdown": score_breakdown,
-            "positive_class": str(positive_class) if positive_class is not None else None,
-            "negative_class": str(negative_class) if negative_class is not None else None,
+            "positive_class": positive_class if positive_class is not None else None,
+            "negative_class": negative_class if negative_class is not None else None,
             "all_numeric_gaps":        all_numeric_gaps,
             "primary_numeric_column":  primary_numeric_column,
             "sample_rows":             _sample_rows,
@@ -597,10 +597,10 @@ def _bias_score_from_rates(rates: list, has_pred: bool = False,
     if not rates or len(rates) < 2:
         return 0.0
     rates_f = [float(r) for r in rates]
-    dpd  = max(rates_f) - min(rates_f)
-    dir_ = min(rates_f) / max(rates_f) if max(rates_f) > 0 else 1.0
+    dpd, dir_ = _compute_dpd_dir_from_rates(rates_f)
     dpd_v = min(dpd / 0.10, 1.0)
-    dir_v = 0.0 if dir_ >= 0.80 else min((0.80 - dir_) / 0.80, 1.0)
+    dir_v = (0.0 if dir_ is not None and dir_ >= 0.80
+             else (min((0.80 - dir_) / 0.80, 1.0) if dir_ is not None else 1.0))
     violations = [dpd_v, dir_v]
     if has_pred and tpr_list and fpr_list and len(tpr_list) >= 2 and len(fpr_list) >= 2:
         tpr_g = max(tpr_list) - min(tpr_list)
@@ -609,28 +609,39 @@ def _bias_score_from_rates(rates: list, has_pred: bool = False,
     return float(round(float(np.mean(violations)) * 100, 1))
 
 
-def _compute_true_accuracy(group_stats: list, adjusted_rates: list) -> float:
+def _compute_dpd_dir_from_rates(rates: list[float]) -> tuple[float, Optional[float]]:
+    if len(rates) < 2:
+        return 0.0, 1.0
+    dpd = round(float(max(rates) - min(rates)), 4)
+    max_r = float(max(rates))
+    if max_r > 0:
+        return dpd, round(float(min(rates) / max_r), 4)
+    return dpd, None
+
+
+def _compute_expected_accuracy(group_stats: list, adjusted_rates: list) -> float:
     """
-    True accuracy estimate: (TP + TN) / N using oracle best-case assignment.
-    TP = min(pred_pos, actual_pos)   [model picks true positives first]
-    TN = min(pred_neg, actual_neg)
-    Always returns a value in [0, 1].
+    Expected accuracy estimate under independence assumption:
+      acc_g = P(pred=1)*P(y=1) + P(pred=0)*P(y=0)
+    where P(pred=1) is the adjusted group rate and P(y=1) is observed prevalence.
+    This avoids optimistic oracle-style assignment and stays in [0, 1].
     """
-    total_correct = 0
+    total_expected_correct = 0.0
     total_n       = 0
     for gs, adj_rate in zip(group_stats, adjusted_rates):
-        n          = gs["count"]
-        actual_pos = gs["pass_count"]
-        actual_neg = gs["fail_count"]
-        pred_pos   = max(0, min(n, int(round(float(adj_rate) * n))))
-        pred_neg   = n - pred_pos
-        tp = min(pred_pos, actual_pos)
-        tn = min(pred_neg, actual_neg)
-        total_correct += tp + tn
+        n = int(gs.get("count", 0))
+        if n <= 0:
+            continue
+        base_pos = float(gs.get("pass_rate", 0.0))
+        base_neg = 1.0 - base_pos
+        pred_pos = max(0.0, min(1.0, float(adj_rate)))
+        pred_neg = 1.0 - pred_pos
+        expected_acc = (pred_pos * base_pos) + (pred_neg * base_neg)
+        total_expected_correct += expected_acc * n
         total_n       += n
     if total_n == 0:
-        return 0.5
-    return float(round(max(0.0, min(1.0, total_correct / total_n)), 4))
+        return 0.0
+    return float(round(max(0.0, min(1.0, total_expected_correct / total_n)), 4))
 
 
 def _compute_stability(adjusted_rates: list) -> float:
@@ -747,8 +758,7 @@ def _method_reweighing(df, computed):
     try:
         sc = computed["sensitive_col"]; tc = computed["target_col"]
         pc = computed["positive_class"]; gs = computed["group_stats"]
-        hp = computed["has_predictions"]
-        if not sc or not tc or not pc:
+        if not sc or not tc or pc is None:
             return {"method": "reweighing", "error": "insufficient columns"}
         total = len(df)
         p_y = {y: len(df[df[tc]==y])/total for y in df[tc].dropna().unique()}
@@ -771,10 +781,9 @@ def _method_reweighing(df, computed):
             if w.sum() == 0: new_rates.append(g_s["pass_rate"]); continue
             wpr = float((w*(gdf[tc]==pc)).sum()/w.sum())
             new_rates.append(round(max(0.0,min(1.0,wpr)),4))
-        acc = _compute_true_accuracy(gs, new_rates)
+        acc = _compute_expected_accuracy(gs, new_rates)
         # bias score recomputed below from dpd/dir after adjustment — _bias_score_from_rates not used here
-        dpd_after = round(max(new_rates) - min(new_rates), 4) if len(new_rates) >= 2 else 0.0
-        dir_after = round(min(new_rates)/max(new_rates), 4) if len(new_rates)>=2 and max(new_rates)>0 else 1.0
+        dpd_after, dir_after = _compute_dpd_dir_from_rates(new_rates)
         return {"method":"reweighing","method_type":"pre-processing","accuracy":acc,"precision":None,"recall":None,"dpd":dpd_after,"dir":dir_after,
                 "tpr_gap":None,"fpr_gap":None,"adjusted_rates":new_rates}
     except Exception as e:
@@ -787,7 +796,7 @@ def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
 
         sc = computed["sensitive_col"]; tc = computed["target_col"]
         pc = computed["positive_class"]; gs = computed["group_stats"]
-        if not sc or not tc or not pc:
+        if not sc or not tc or pc is None:
             return {"method":"threshold_optimisation","error":"insufficient columns"}
 
         X, y, sensitive = _prepare_training_frame(df, computed)
@@ -841,8 +850,7 @@ def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
             best_rates.append(round(float(np.mean(y_hat[mask] == 1)), 4))
 
         acc = float(round(np.mean(y_hat == np.array(y, dtype=int)), 4))
-        dpd_after = round(max(best_rates)-min(best_rates),4) if len(best_rates)>=2 else 0.0
-        dir_after = round(min(best_rates)/max(best_rates),4) if len(best_rates)>=2 and max(best_rates)>0 else 1.0
+        dpd_after, dir_after = _compute_dpd_dir_from_rates(best_rates)
         prec, rec = _binary_pr(np.array(y, dtype=int), y_hat)
         return {"method":"threshold_optimisation","method_type":"post-processing","accuracy":acc,"precision":prec,"recall":rec,"dpd":dpd_after,"dir":dir_after,
                 "tpr_gap":None,"fpr_gap":None,"adjusted_rates":best_rates,
@@ -873,11 +881,10 @@ def _method_disparate_impact_remover(df, computed, repair_level=DEFAULT_REPAIR_L
         if len(adjusted_rates) < 2:
             return {"method":"disparate_impact_remover","error":"no groups processed"}
 
-        dpd_after = round(max(adjusted_rates) - min(adjusted_rates), 4)
-        dir_after = round(min(adjusted_rates)/max(adjusted_rates), 4) if max(adjusted_rates) > 0 else 1.0
+        dpd_after, dir_after = _compute_dpd_dir_from_rates(adjusted_rates)
 
         gs = computed.get("group_stats", [])
-        acc = _compute_true_accuracy(gs, adjusted_rates)
+        acc = _compute_expected_accuracy(gs, adjusted_rates)
         prec = rec = None
 
         return {
@@ -947,8 +954,7 @@ def _method_reject_option_classification(df, computed):
                 continue
             adjusted_rates.append(round(float(np.mean(adjusted_pred[mask] == 1)), 4))
 
-        dpd_after = round(max(adjusted_rates)-min(adjusted_rates),4) if len(adjusted_rates) >= 2 else 0.0
-        dir_after = round(min(adjusted_rates)/max(adjusted_rates),4) if len(adjusted_rates) >= 2 and max(adjusted_rates) > 0 else 1.0
+        dpd_after, dir_after = _compute_dpd_dir_from_rates(adjusted_rates)
         acc = float(round(np.mean(adjusted_pred == np.array(y, dtype=int)), 4))
         prec, rec = _binary_pr(np.array(y, dtype=int), adjusted_pred)
         return {
@@ -1001,8 +1007,7 @@ def _real_method_fairlearn(df: pd.DataFrame, computed: dict):
             mask = sensitive.astype(str) == str(grp)
             rates.append(round(float(np.mean(y_pred[mask] == 1)), 4))
         acc = float(round(np.mean(y_pred == y), 4))
-        dpd_after = round(max(rates) - min(rates), 4) if len(rates) >= 2 else 0.0
-        dir_after = round(min(rates) / max(rates), 4) if len(rates) >= 2 and max(rates) > 0 else 1.0
+        dpd_after, dir_after = _compute_dpd_dir_from_rates(rates)
         return {
             "method": "fairlearn_exponentiated_gradient",
             "accuracy": acc,
@@ -1055,8 +1060,7 @@ def _real_method_aif360_reweighing(df: pd.DataFrame, computed: dict):
             mask = sensitive.astype(str) == str(grp)
             rates.append(round(float(np.mean(y_pred[mask] == 1)), 4))
         acc = float(round(np.mean(y_pred == y), 4))
-        dpd_after = round(max(rates) - min(rates), 4) if len(rates) >= 2 else 0.0
-        dir_after = round(min(rates) / max(rates), 4) if len(rates) >= 2 and max(rates) > 0 else 1.0
+        dpd_after, dir_after = _compute_dpd_dir_from_rates(rates)
         prec, rec = _binary_pr(np.array(y, dtype=int), np.array(y_pred, dtype=int))
         return {
             "method": "reweighing",
@@ -1087,7 +1091,8 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
     """
     before_score   = computed["bias_score"]
     before_dpd     = float(computed.get("dpd", 0.0))
-    before_dir     = float(computed.get("dir_", 1.0) or 1.0)
+    before_dir_raw = computed.get("dir_", 1.0)
+    before_dir     = float(before_dir_raw) if before_dir_raw is not None else None
     group_stats    = computed["group_stats"]
     original_rates = [float(gs["pass_rate"]) for gs in group_stats]
     global_target  = float(np.median(original_rates))
@@ -1150,9 +1155,15 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
             rec       = r.get("recall")
             method_type = r.get("method_type", "unknown")
             dpd_after = float(r.get("dpd", before_dpd))
-            dir_after = float(r.get("dir", before_dir))
+            dir_raw = r.get("dir", before_dir)
+            dir_after = float(dir_raw) if dir_raw is not None else None
             adj_rates = r.get("adjusted_rates", original_rates)
-            valid     = bool(dpd_after < before_dpd)   # valid if DPD actually decreased
+            before_dir_safe = 0.0 if before_dir is None else before_dir
+            after_dir_safe = 0.0 if dir_after is None else dir_after
+            valid = bool(
+                (dpd_after < before_dpd)
+                or (dpd_after <= before_dpd and after_dir_safe > before_dir_safe)
+            )
 
         acc       = max(0.0, min(1.0, acc))
         dpd_after = max(0.0, min(1.0, dpd_after))
@@ -1178,7 +1189,8 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
         # Compute projected bias score using the SAME formula as compute_raw_stats
         # so it's consistent and meaningful
         proj_dpd_v = min(dpd_after / 0.10, 1.0)
-        proj_dir_v = 0.0 if dir_after >= 0.80 else min((0.80 - dir_after) / 0.80, 1.0)
+        proj_dir_v = (0.0 if dir_after is not None and dir_after >= 0.80
+                      else (min((0.80 - dir_after) / 0.80, 1.0) if dir_after is not None else 1.0))
         proj_bias  = round(float(np.mean([proj_dpd_v, proj_dir_v])) * 100, 1)
 
         tpr_gap_val = r.get("tpr_gap") if isinstance(r, dict) else None
@@ -1197,11 +1209,11 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
             tpr_gap=round(float(tpr_gap_val), 4) if tpr_gap_val is not None else 0.0,
             fpr_gap=round(float(fpr_gap_val), 4) if fpr_gap_val is not None else 0.0,
             dpd=round(dpd_val, 4),
-            dir=round(float(dir_after), 4),
+            dir=round(float(dir_after), 4) if dir_after is not None else None,
             before_dpd=round(before_dpd, 4),
             after_dpd=round(dpd_after, 4),
-            before_dir=round(before_dir, 4),
-            after_dir=round(dir_after, 4),
+            before_dir=round(before_dir, 4) if before_dir is not None else None,
+            after_dir=round(dir_after, 4) if dir_after is not None else None,
             before_accuracy=baseline_acc,
             after_accuracy=round(acc, 4),
             before_precision=baseline_precision,
@@ -1248,7 +1260,9 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
     trade_off = (
         f"Bias changed from {before_score} to {bias_after} "
         f"({'↓' if improvement >= 0 else '↑'}{abs(improvement)} pts, {abs(pct_reduc)}% magnitude). "
-        f"DPD changed {before_dpd:.4f} → {dpd_after_b:.4f}; DIR tracked from {before_dir:.4f} to {best.dir:.4f}. "
+        f"DPD changed {before_dpd:.4f} → {dpd_after_b:.4f}; DIR tracked from "
+        f"{(f'{before_dir:.4f}' if before_dir is not None else 'undefined')} to "
+        f"{(f'{best.dir:.4f}' if best.dir is not None else 'undefined')}. "
         f"{acc_fragment} "
         f"{fair_msg} No method guarantees perfect fairness."
     )
@@ -1257,7 +1271,7 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
         f"(rank={best.final_score:.3f}): "
         f"DPD {before_dpd:.4f} → {dpd_after_b:.4f} (↓{dpd_improv:.4f}), "
         f"projected bias {before_score} → {bias_after}, "
-        f"est. accuracy {acc_after*100:.1f}%."
+        f"est. accuracy {(acc_after*100):.1f}%."
     )
 
     return MitigationSummary(
