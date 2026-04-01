@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { analyseText } from '../api/fairlens'
-import { auditDataset, parseCsvHeaders } from '../api/audit'
+import { auditDataset, parseCsvHeaders, sampleAudit } from '../api/audit'
 import { saveToHistory, saveToAuditHistory, generateId, getHistory, getAuditHistory } from '../api/history'
 import DatasetUpload from '../components/DatasetUpload'
 import HistoryPanel from '../components/HistoryPanel'
@@ -31,6 +31,7 @@ export default function Home() {
   const [auditLoading, setAuditLoading] = useState(false)
   const [auditError, setAuditError] = useState('')
   const [descFocused, setDescFocused] = useState(false)
+  const [privacyMode, setPrivacyMode] = useState(true)
 
   // Shared
   const [showTextHistory, setShowTextHistory] = useState(false)
@@ -80,6 +81,7 @@ export default function Home() {
         targetColumn: targetCol || null,
         sensitiveColumn: sensitiveCol || null,
         sensitiveColumn2: sensitiveCol2 || null,
+        privacyMode,
       })
       saveToAuditHistory({ id: generateId(), timestamp: Date.now(), description: description.trim(), result })
       navigate('/audit-results', { state: { result, description: description.trim() } })
@@ -90,6 +92,20 @@ export default function Home() {
 
   function handleAuditHistoryOpen(entry) {
     navigate('/audit-results', { state: { result: entry.result, description: entry.description || '' } })
+  }
+
+  async function runSample(datasetName) {
+    setAuditError('')
+    setAuditLoading(true)
+    try {
+      const result = await sampleAudit(datasetName)
+      saveToAuditHistory({ id: generateId(), timestamp: Date.now(), description: `Sample: ${datasetName}`, result })
+      navigate('/audit-results', { state: { result, description: `Sample: ${datasetName}` } })
+    } catch (err) {
+      setAuditError(`Sample audit failed: ${err?.response?.data?.detail || err.message}`)
+    } finally {
+      setAuditLoading(false)
+    }
   }
 
   const canRunAudit = csvFile && description.trim().length > 10
@@ -228,6 +244,14 @@ export default function Home() {
                   <p className={styles.stepHint}>
                     FairLens sends your dataset statistics and description to Gemini 2.5 Flash. It computes fairness metrics, detects bias patterns, and returns a structured audit report with findings, charts, and recommendations.
                   </p>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, color: 'var(--text-muted)' }}>
+                    <input type="checkbox" checked={privacyMode} onChange={e => setPrivacyMode(e.target.checked)} />
+                    Privacy mode (no external API call, no server-side audit persistence)
+                  </label>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                    <button className={styles.exampleBtn} type="button" onClick={() => runSample('compas')} disabled={auditLoading}>Sample: COMPAS</button>
+                    <button className={styles.exampleBtn} type="button" onClick={() => runSample('adult_income')} disabled={auditLoading}>Sample: Adult Income</button>
+                  </div>
                 </div>
               </div>
             </div>

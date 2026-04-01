@@ -198,6 +198,54 @@ async def audit_dataset(request: AuditRequest):
         raise HTTPException(status_code=500, detail=f"Audit failed: {str(e)}")
 
 
+@router.get("/sample-audit/{dataset_name}", response_model=AuditResponse)
+async def sample_audit(dataset_name: str):
+    """
+    Run instant demo audits for built-in datasets.
+    Supported: compas, adult_income
+    """
+    samples = {
+        "compas": """race,sex,two_year_recid,prediction,age
+African-American,Male,1,1,23
+African-American,Male,1,1,31
+Caucasian,Male,0,0,42
+Caucasian,Female,0,0,37
+African-American,Female,1,1,29
+Caucasian,Male,0,1,51
+""",
+        "adult_income": """sex,income,prediction,age,hours_per_week
+Male,1,1,39,40
+Female,0,0,38,35
+Male,1,1,28,50
+Female,0,1,44,45
+Male,0,0,35,20
+Female,1,1,41,45
+""",
+    }
+    key = dataset_name.strip().lower()
+    if key not in samples:
+        raise HTTPException(status_code=404, detail="Unknown sample dataset. Use compas or adult_income.")
+    import base64
+
+    b64 = base64.b64encode(samples[key].encode("utf-8")).decode("utf-8")
+    payload = AuditRequest(
+        dataset=b64,
+        description=f"Sample audit for {key}",
+        target_column="two_year_recid" if key == "compas" else "income",
+        sensitive_column="race" if key == "compas" else "sex",
+        prediction_column="prediction",
+        privacy_mode=True,
+    )
+    try:
+        return await run_audit(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sample audit failed: {str(e)}")
+
+
 @router.post("/audit-chat", response_model=ChatResponse)
 async def audit_chat(request: ChatRequest):
     """

@@ -64,6 +64,12 @@
   white-space: pre-wrap;
 }
 
+.diffMeta {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  margin-top: 0.25rem;
+}
+
 .arrow {
   font-size: 1.5rem;
   color: var(--text-muted);
