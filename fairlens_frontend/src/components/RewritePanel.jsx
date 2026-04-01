@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import ReactDiffViewer from 'react-diff-viewer-continued'
 import HighlightedText from './HighlightedText'
 import Icon from './Icon'
 import styles from './RewritePanel.module.css'
@@ -45,15 +44,6 @@ export default function RewritePanel({ original, unbiased, flaggedPhrases }) {
           </button>
         </div>
         <p className={styles.text}>{unbiased}</p>
-        <div style={{ marginTop: 12 }}>
-          <ReactDiffViewer
-            oldValue={original || ''}
-            newValue={unbiased || ''}
-            splitView={false}
-            hideLineNumbers
-            disableWordDiff={false}
-          />
-        </div>
       </div>
     </div>
   )
