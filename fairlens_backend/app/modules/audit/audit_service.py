@@ -1393,14 +1393,6 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
     root_causes      = generate_root_causes(stats)
     bias_origin_dict = detect_bias_origin(stats)
     mitigation       = run_mitigation(df, c)
-    compliance_payload = evaluate_eu_ai_act(
-        bias_score=c["bias_score"],
-        metrics=c["metrics"],
-        group_stats=c["group_stats"],
-        summary="",
-        key_findings=[],
-        recommendations=[],
-    )
     prompt           = build_prompt(stats, root_causes, reliability_dict)
     if request.privacy_mode:
         ai = {
