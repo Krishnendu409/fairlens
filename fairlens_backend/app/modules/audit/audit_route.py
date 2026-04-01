@@ -4,7 +4,9 @@ audit_route.py — audit endpoints + compliance record persistence
 
 import uuid
 import re
+import base64
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional, get_args, get_origin
 
 from fastapi import APIRouter, HTTPException
@@ -283,3 +285,32 @@ async def fetch_compliance_record(record_id: str):
         return ComplianceRecordResponse(**{**record, "hash_valid": hash_valid})
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Compliance record not found")
+
+
+@router.get("/sample-audit/{dataset_name}", response_model=AuditResponse)
+async def sample_audit(dataset_name: str):
+    dataset_map = {
+        "adult": "adult_small.csv",
+        "compas": "compas_small.csv",
+    }
+    file_name = dataset_map.get(dataset_name.lower())
+    if not file_name:
+        raise HTTPException(status_code=404, detail="Sample dataset not found")
+
+    sample_path = Path(__file__).resolve().parent / "sample_data" / file_name
+    if not sample_path.exists():
+        raise HTTPException(status_code=500, detail="Sample dataset file missing on server")
+
+    encoded = base64.b64encode(sample_path.read_bytes()).decode("utf-8")
+    request = AuditRequest(
+        dataset=encoded,
+        description=f"Built-in sample audit for {dataset_name}.",
+        target_column="income" if dataset_name.lower() == "adult" else "two_year_recid",
+        sensitive_column="gender" if dataset_name.lower() == "adult" else "race",
+        prediction_column="prediction",
+        privacy_mode=True,
+    )
+    try:
+        return await run_audit(request)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Sample audit failed: {exc}")

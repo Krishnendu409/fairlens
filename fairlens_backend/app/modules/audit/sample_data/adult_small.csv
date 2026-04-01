@@ -1,0 +1,11 @@
+gender,income,prediction,age
+Male,1,1,39
+Female,0,0,28
+Male,1,1,45
+Female,0,0,31
+Male,1,1,50
+Female,0,1,36
+Male,1,1,42
+Female,0,0,27
+Male,0,1,33
+Female,1,0,40

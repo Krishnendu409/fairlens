@@ -15,6 +15,17 @@ import BadgeModal from '../components/BadgeModal'
 import styles from './AuditResultsPage.module.css'
 
 // ── Metric Card ───────────────────────────────────────────────────────────────
+function getMetricTooltip(metricKey) {
+  const tooltipMap = {
+    demographic_parity_difference: 'Absolute difference in positive outcome rates between groups.',
+    disparate_impact_ratio: 'Ratio of lowest to highest group selection rate. >=0.80 preferred.',
+    theil_index: 'Inequality index across groups; lower is better.',
+    tpr_gap: 'Difference in true positive rates across groups.',
+    fpr_gap: 'Difference in false positive rates across groups.',
+  }
+  return tooltipMap[metricKey] || 'Metric detail'
+}
+
 function MetricCard({ metric, plainLang }) {
   const val = metric.value ?? 0
   const thr = metric.threshold ?? 1
@@ -25,6 +36,9 @@ function MetricCard({ metric, plainLang }) {
     <div className={`${styles.metricCard} ${metric.flagged ? styles.metricFlagged : styles.metricOk}`}>
       <div className={styles.metricHeader}>
         <span className={styles.metricName}>{metric.name}</span>
+        <span title={getMetricTooltip(metric.key)}>
+          ⓘ
+        </span>
         <span className={`${styles.badge} ${metric.flagged ? styles.badgeRed : styles.badgeGreen}`}>
           {metric.flagged ? 'Flagged' : 'OK'}
         </span>
@@ -228,6 +242,7 @@ export default function AuditResultsPage() {
   const [shareState, setShareState] = useState('idle')
   const [exporting, setExporting] = useState(false)
   const [showBadgeModal, setShowBadgeModal] = useState(false)
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState('')
   const [searchParams] = useSearchParams()
 
   let result, datasetDescription
@@ -271,6 +286,10 @@ export default function AuditResultsPage() {
     plain_language = {},
     sample_rows = [],
     group_rates_map = {},
+    fairness_grade,
+    privacy_mode,
+    integrity_hash,
+    compliance_result,
   } = result
 
   const scoreColor = bias_score < 20 ? '#4ade80' : bias_score < 45 ? '#fbbf24' : bias_score < 70 ? '#f97316' : '#f87171'
@@ -320,7 +339,10 @@ export default function AuditResultsPage() {
 
   async function handleExport() {
     setExporting(true)
-    try { await exportAuditToPdf(result, datasetDescription) } finally { setExporting(false) }
+    try {
+      const out = await exportAuditToPdf(result, datasetDescription)
+      if (out?.url) setPdfPreviewUrl(out.url)
+    } finally { setExporting(false) }
   }
 
   const tabBadges = {
@@ -382,6 +404,16 @@ export default function AuditResultsPage() {
                 <div className={styles.riskBadge} style={{ background: scoreColor + '22', color: scoreColor, borderColor: scoreColor + '55' }}>
                   {risk_label}
                 </div>
+                {fairness_grade && (
+                  <div className={styles.riskBadge} style={{ marginTop: 8 }}>
+                    Fairness Grade: {fairness_grade}
+                  </div>
+                )}
+                {privacy_mode && (
+                  <div className={styles.riskBadge} style={{ marginTop: 8 }}>
+                    Privacy Mode Enabled
+                  </div>
+                )}
                 <h1 className={styles.summaryTitle}>{bias_level} Bias Detected</h1>
                 <p className={styles.summaryMeta}>
                   {total_rows?.toLocaleString()} rows · {columns?.length} columns ·
@@ -584,6 +616,13 @@ export default function AuditResultsPage() {
             <h3 className={styles.subTitle}>All Fairness Metrics</h3>
             <div className={styles.metricsGrid}>
               {metrics.map(m => <MetricCard key={m.key} metric={m} plainLang={plain_language[m.key]}/>)}
+            </div>
+            <div className={styles.card}>
+              <h3 className={styles.cardTitle}>Compliance Engine Output</h3>
+              <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-muted)' }}>
+                {JSON.stringify(compliance_result || {}, null, 2)}
+              </pre>
+              {integrity_hash && <p><strong>Integrity Hash:</strong> {integrity_hash}</p>}
             </div>
 
             {group_stats.length > 0 && (
@@ -990,6 +1029,12 @@ export default function AuditResultsPage() {
                 ))}
               </div>
             </div>
+            {pdfPreviewUrl && (
+              <div className={styles.card}>
+                <h3 className={styles.cardTitle}>PDF Preview</h3>
+                <iframe title="Compliance PDF preview" src={pdfPreviewUrl} style={{ width: '100%', height: 500, border: '1px solid var(--border)' }} />
+              </div>
+            )}
           </div>
         )}
 

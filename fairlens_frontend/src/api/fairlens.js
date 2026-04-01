@@ -5,10 +5,11 @@ const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
-export async function analyseText(prompt, aiResponse) {
+export async function analyseText(prompt, aiResponse, privacyMode = false) {
   const { data } = await api.post('/analyse', {
     prompt,
     ai_response: aiResponse,
+    privacy_mode: !!privacyMode,
   })
   return data
 }

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { analyseText } from '../api/fairlens'
-import { auditDataset, parseCsvHeaders } from '../api/audit'
+import { auditDataset, parseCsvHeaders, runSampleAudit } from '../api/audit'
 import { saveToHistory, saveToAuditHistory, generateId, getHistory, getAuditHistory } from '../api/history'
 import DatasetUpload from '../components/DatasetUpload'
 import HistoryPanel from '../components/HistoryPanel'
@@ -31,6 +31,7 @@ export default function Home() {
   const [auditLoading, setAuditLoading] = useState(false)
   const [auditError, setAuditError] = useState('')
   const [descFocused, setDescFocused] = useState(false)
+  const [privacyMode, setPrivacyMode] = useState(true)
 
   // Shared
   const [showTextHistory, setShowTextHistory] = useState(false)
@@ -42,7 +43,7 @@ export default function Home() {
     if (!prompt.trim() || !aiResponse.trim()) { setTextError('Please fill in both fields.'); return }
     setTextError(''); setTextLoading(true)
     try {
-      const result = await analyseText(prompt.trim(), aiResponse.trim())
+      const result = await analyseText(prompt.trim(), aiResponse.trim(), false)
       saveToHistory({ id: generateId(), timestamp: Date.now(), prompt: prompt.trim(), aiResponse: aiResponse.trim(), result })
       navigate('/results', { state: { result, prompt: prompt.trim(), aiResponse: aiResponse.trim() } })
     } catch (err) {
@@ -80,6 +81,7 @@ export default function Home() {
         targetColumn: targetCol || null,
         sensitiveColumn: sensitiveCol || null,
         sensitiveColumn2: sensitiveCol2 || null,
+        privacyMode,
       })
       saveToAuditHistory({ id: generateId(), timestamp: Date.now(), description: description.trim(), result })
       navigate('/audit-results', { state: { result, description: description.trim() } })
@@ -90,6 +92,19 @@ export default function Home() {
 
   function handleAuditHistoryOpen(entry) {
     navigate('/audit-results', { state: { result: entry.result, description: entry.description || '' } })
+  }
+
+  async function handleSampleAudit(dataset) {
+    setAuditError('')
+    setAuditLoading(true)
+    try {
+      const result = await runSampleAudit(dataset)
+      navigate('/audit-results', { state: { result, description: `Sample dataset: ${dataset}` } })
+    } catch (err) {
+      setAuditError(`Sample audit failed: ${err?.response?.data?.detail || err.message}`)
+    } finally {
+      setAuditLoading(false)
+    }
   }
 
   const canRunAudit = csvFile && description.trim().length > 10
@@ -220,6 +235,17 @@ export default function Home() {
                 </div>
               </div>
 
+              <div className={`${styles.stepRow} ${!csvFile ? styles.stepDisabled : ''}`}>
+                <div className={styles.stepNum}>3.5</div>
+                <div className={styles.stepContent}>
+                  <p className={styles.stepLabel}>Privacy Mode</p>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <input type="checkbox" checked={privacyMode} onChange={(e) => setPrivacyMode(e.target.checked)} />
+                    Keep dataset local (no external dataset sharing)
+                  </label>
+                </div>
+              </div>
+
               {/* Step 4: Run */}
               <div className={`${styles.stepRow} ${!canRunAudit ? styles.stepDisabled : ''}`}>
                 <div className={styles.stepNum}>4</div>
@@ -239,6 +265,14 @@ export default function Home() {
                 ? <><span className={styles.spinner} />Analysing with Gemini 2.5 Flash...</>
                 : 'Run Fairness Audit'}
             </button>
+            <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+              <button className={styles.exampleBtn} onClick={() => handleSampleAudit('adult')} disabled={auditLoading}>
+                Try Adult Sample
+              </button>
+              <button className={styles.exampleBtn} onClick={() => handleSampleAudit('compas')} disabled={auditLoading}>
+                Try COMPAS Sample
+              </button>
+            </div>
           </div>
         )}
 

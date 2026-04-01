@@ -158,6 +158,11 @@ class AuditResponse(BaseModel):
     primary_numeric_column: Optional[str] = None
     sample_rows: List[Dict[str, Any]] = []
     group_rates_map: Dict[str, float] = {}
+    integrity_hash: Optional[str] = None
+    compliance_result: Optional[Dict[str, Any]] = None
+    fairness_grade: Optional[str] = None
+    privacy_mode: bool = False
+    audit_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):

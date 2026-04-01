@@ -1,4 +1,3 @@
-import fcntl
 import hashlib
 import json
 import os
@@ -7,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from filelock import FileLock
 
 
 def _utc_now_iso() -> str:
@@ -39,12 +39,9 @@ class JSONStorageManager:
 
     @contextmanager
     def _global_lock(self):
-        with open(self.lock_file, "r+", encoding="utf-8") as lockf:
-            fcntl.flock(lockf, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lockf, fcntl.LOCK_UN)
+        lock = FileLock(str(self.lock_file) + ".filelock")
+        with lock:
+            yield
 
     @staticmethod
     def _read_json(path: Path) -> Dict[str, Any]:
@@ -140,9 +137,9 @@ class JSONStorageManager:
         with self._global_lock():
             index = self._load_index()
             path_str = index.get("audits", {}).pop(audit_id, None)
-            self._write_index(index)
             if not path_str:
                 return False
+            self._write_index(index)
             path = Path(path_str)
             if path.exists():
                 path.unlink()
@@ -161,6 +158,10 @@ class JSONStorageManager:
 
     def save(self, record: Dict[str, Any], previous_hash: Optional[str] = None) -> Dict[str, Any]:
         with self._global_lock():
+            required = {"record_id", "updated_at", "compliance_metadata", "integrity_hash"}
+            missing = required - set(record.keys())
+            if missing:
+                raise ValueError(f"Invalid compliance record payload: missing {sorted(missing)}")
             report_id = record["record_id"]
             report_path = self.reports_dir / f"{report_id}.json"
             self._write_json(report_path, record)

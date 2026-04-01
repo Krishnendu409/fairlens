@@ -26,6 +26,7 @@ const C = {
 }
 
 const METHODOLOGY_VERSION = 'FL-2026.03-v3.0'
+// Pinned methodology digest for exported reports; update only when scoring/compliance logic changes materially.
 const METHODOLOGY_HASH = 'b7a4f3e2c1d09f8e'
 const MAX_TABLE_CELL_CHARS = 1200
 const MAX_TABLE_CELL_LINES = 14
@@ -679,7 +680,10 @@ export async function exportAuditToPdf(result, description) {
   y = drawGridTable(doc, ['Field', 'Value'], appendixRows, y, [70, 110])
 
   pageFooter(doc)
+  const blob = doc.output('blob')
+  const url = URL.createObjectURL(blob)
   doc.save(`FairLens_Compliance_Audit_${Date.now()}.pdf`)
+  return { url }
 }
 
 // ── Text Analysis PDF Export ─────────────────────────────────────────────────
