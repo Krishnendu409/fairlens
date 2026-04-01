@@ -30,7 +30,7 @@ LABEL-ONLY MODE:
 """
 
 import os, json, re, base64, io, ssl
-from typing import Optional
+from typing import Optional, Tuple
 from dotenv import load_dotenv
 
 import numpy as np
@@ -548,12 +548,39 @@ Formula: mean({[round(v*100,1) for v in violations]}) = {bias_score}"""
 def run_statistical_test(df: pd.DataFrame, sensitive_col: str,
                          target_col: str, positive_class) -> dict:
     try:
-        contingency = pd.crosstab(df[sensitive_col], df[target_col])
-        chi2, p, dof, _ = scipy_stats.chi2_contingency(contingency)
+        work = df[[sensitive_col, target_col]].dropna()
+        contingency = pd.crosstab(work[sensitive_col], work[target_col])
+        if contingency.shape[0] < 2 or contingency.shape[1] < 2:
+            return {
+                "test": "chi_square",
+                "statistic": 0.0,
+                "p_value": 1.0,
+                "is_significant": False,
+                "interpretation": "Not enough group/outcome variation to run chi-square test.",
+                "cramers_v": None,
+                "effect_size": None,
+            }
+
+        # Pearson chi-square test of independence (without Yates correction).
+        chi2, p, dof, _ = scipy_stats.chi2_contingency(contingency, correction=False)
         sig = bool(p < 0.05)
         n = int(contingency.values.sum())
-        k = min(contingency.shape)
-        cramers_v = round(float(np.sqrt(float(chi2) / (n * (k - 1)))), 4) if n > 0 and k > 1 else None
+        r, k = contingency.shape
+
+        # Bias-corrected Cramer's V (Bergsma, 2013) for more stable effect size,
+        # especially in smaller samples and non-square contingency tables.
+        if n > 1:
+            phi2 = float(chi2) / float(n)
+            # Finite-sample bias correction for phi^2.
+            phi2_corr = max(0.0, phi2 - ((k - 1) * (r - 1)) / float(n - 1))
+            # Corrected effective table dimensions (rows/columns).
+            rows_corrected = r - ((r - 1) ** 2) / float(n - 1)
+            cols_corrected = k - ((k - 1) ** 2) / float(n - 1)
+            denom = min(cols_corrected - 1, rows_corrected - 1)
+            cramers_v = round(float(np.sqrt(phi2_corr / denom)), 4) if denom > 0 else 0.0
+        else:
+            cramers_v = None
+
         if cramers_v is not None:
             if cramers_v >= 0.40:   effect_size = "large"
             elif cramers_v >= 0.20: effect_size = "medium"
@@ -649,6 +676,32 @@ def _compute_stability(adjusted_rates: list) -> float:
     if len(adjusted_rates) < 2:
         return 1.0
     return float(round(max(0.0, min(1.0, 1.0 - float(np.std(adjusted_rates)))), 4))
+
+
+def _compute_tpr_fpr_gaps(y_true: np.ndarray, y_pred: np.ndarray, sensitive: pd.Series) -> Tuple[Optional[float], Optional[float]]:
+    tpr_vals = []
+    fpr_vals = []
+    sensitive_str = sensitive.astype(str)
+    # Stable deterministic ordering for reporting and reproducibility.
+    # Lexicographic ordering is intentional for mixed/string group labels.
+    unique_groups = sorted(sensitive_str.unique())
+    for grp in unique_groups:
+        mask = sensitive_str == str(grp)
+        if int(mask.sum()) == 0:
+            continue
+        yt = np.array(y_true[mask], dtype=int)
+        yp = np.array(y_pred[mask], dtype=int)
+        tp = int(np.sum((yt == 1) & (yp == 1)))
+        fp = int(np.sum((yt == 0) & (yp == 1)))
+        fn = int(np.sum((yt == 1) & (yp == 0)))
+        tn = int(np.sum((yt == 0) & (yp == 0)))
+        if (tp + fn) > 0:
+            tpr_vals.append(float(tp / (tp + fn)))
+        if (fp + tn) > 0:
+            fpr_vals.append(float(fp / (fp + tn)))
+    tpr_gap = round(float(max(tpr_vals) - min(tpr_vals)), 4) if len(tpr_vals) >= 2 else None
+    fpr_gap = round(float(max(fpr_vals) - min(fpr_vals)), 4) if len(fpr_vals) >= 2 else None
+    return tpr_gap, fpr_gap
 
 
 def _binary_pr(y_true, y_pred) -> tuple[float, float]:
@@ -852,8 +905,9 @@ def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
         acc = float(round(np.mean(y_hat == np.array(y, dtype=int)), 4))
         dpd_after, dir_after = _compute_dpd_dir_from_rates(best_rates)
         prec, rec = _binary_pr(np.array(y, dtype=int), y_hat)
+        tpr_gap, fpr_gap = _compute_tpr_fpr_gaps(np.array(y, dtype=int), y_hat, sensitive)
         return {"method":"threshold_optimisation","method_type":"post-processing","accuracy":acc,"precision":prec,"recall":rec,"dpd":dpd_after,"dir":dir_after,
-                "tpr_gap":None,"fpr_gap":None,"adjusted_rates":best_rates,
+                "tpr_gap":tpr_gap,"fpr_gap":fpr_gap,"adjusted_rates":best_rates,
                 "global_target":round(global_target,4)}
     except Exception as e:
         return {"method":"threshold_optimisation","error":str(e)}
@@ -957,6 +1011,7 @@ def _method_reject_option_classification(df, computed):
         dpd_after, dir_after = _compute_dpd_dir_from_rates(adjusted_rates)
         acc = float(round(np.mean(adjusted_pred == np.array(y, dtype=int)), 4))
         prec, rec = _binary_pr(np.array(y, dtype=int), adjusted_pred)
+        tpr_gap, fpr_gap = _compute_tpr_fpr_gaps(np.array(y, dtype=int), adjusted_pred, sensitive)
         return {
             "method":"reject_option_classification",
             "method_type":"post-processing",
@@ -965,8 +1020,8 @@ def _method_reject_option_classification(df, computed):
             "recall":rec,
             "dpd":dpd_after,
             "dir":dir_after,
-            "tpr_gap":None,
-            "fpr_gap":None,
+            "tpr_gap":tpr_gap,
+            "fpr_gap":fpr_gap,
             "adjusted_rates":adjusted_rates,
         }
     except Exception as e:
@@ -1062,6 +1117,7 @@ def _real_method_aif360_reweighing(df: pd.DataFrame, computed: dict):
         acc = float(round(np.mean(y_pred == y), 4))
         dpd_after, dir_after = _compute_dpd_dir_from_rates(rates)
         prec, rec = _binary_pr(np.array(y, dtype=int), np.array(y_pred, dtype=int))
+        tpr_gap, fpr_gap = _compute_tpr_fpr_gaps(np.array(y, dtype=int), np.array(y_pred, dtype=int), sensitive)
         return {
             "method": "reweighing",
             "method_type": "pre-processing",
@@ -1070,8 +1126,8 @@ def _real_method_aif360_reweighing(df: pd.DataFrame, computed: dict):
             "recall": rec,
             "dpd": dpd_after,
             "dir": dir_after,
-            "tpr_gap": None,
-            "fpr_gap": None,
+            "tpr_gap": tpr_gap,
+            "fpr_gap": fpr_gap,
             "adjusted_rates": rates,
         }
     except Exception as e:
@@ -1191,10 +1247,16 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
         proj_dpd_v = min(dpd_after / 0.10, 1.0)
         proj_dir_v = (0.0 if dir_after is not None and dir_after >= 0.80
                       else (min((0.80 - dir_after) / 0.80, 1.0) if dir_after is not None else 1.0))
-        proj_bias  = round(float(np.mean([proj_dpd_v, proj_dir_v])) * 100, 1)
-
+        proj_violations = [proj_dpd_v, proj_dir_v]
         tpr_gap_val = r.get("tpr_gap") if isinstance(r, dict) else None
         fpr_gap_val = r.get("fpr_gap") if isinstance(r, dict) else None
+        # Keep projected EO contribution symmetric with baseline scoring:
+        # only include EO penalties when both gaps are available.
+        if computed.get("has_predictions") and tpr_gap_val is not None and fpr_gap_val is not None:
+            proj_violations.append(min(float(tpr_gap_val) / 0.10, 1.0))
+            proj_violations.append(min(float(fpr_gap_val) / 0.10, 1.0))
+        proj_bias  = round(float(np.mean(proj_violations)) * 100, 1)
+
         dpd_val     = dpd_after
 
         results.append(MitigationMethodResult(
@@ -1206,8 +1268,8 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
             accuracy=round(acc, 4),
             precision=round(float(prec), 4) if prec is not None else None,
             recall=round(float(rec), 4) if rec is not None else None,
-            tpr_gap=round(float(tpr_gap_val), 4) if tpr_gap_val is not None else 0.0,
-            fpr_gap=round(float(fpr_gap_val), 4) if fpr_gap_val is not None else 0.0,
+            tpr_gap=round(float(tpr_gap_val), 4) if tpr_gap_val is not None else None,
+            fpr_gap=round(float(fpr_gap_val), 4) if fpr_gap_val is not None else None,
             dpd=round(dpd_val, 4),
             dir=round(float(dir_after), 4) if dir_after is not None else None,
             before_dpd=round(before_dpd, 4),

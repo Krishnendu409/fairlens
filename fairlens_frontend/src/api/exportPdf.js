@@ -435,6 +435,9 @@ export async function exportAuditToPdf(result, description, options = {}) {
   } catch {}
   const readiness = computeAuditReadiness(compliance, result)
   const gaps = criticalGaps(compliance)
+  const complianceEval = result?.compliance || {}
+  const gapMatrix = Array.isArray(complianceEval.gap_matrix) ? complianceEval.gap_matrix : []
+  const remainingControls = Array.isArray(complianceEval.remaining_controls) ? complianceEval.remaining_controls : []
 
   // ── Metrics convenience ─────────────────────────────────────────────────────
   const dpd  = result.metrics?.find(m=>m.key==='demographic_parity_difference')?.value??0
@@ -861,6 +864,32 @@ export async function exportAuditToPdf(result, description, options = {}) {
   y = alertBox(doc, 'ART. 6 + ART. 43 — MANDATORY OPERATOR ACTION',
     'If this system is confirmed as high-risk under Annex III: (1) A full Article 9 risk management system must be established; (2) An Article 17 quality management system must be implemented; (3) An Article 43 conformity assessment must be completed before deployment; (4) The system must be registered in the EU AI database under Article 71; (5) CE marking is required (Art. 48); (6) Technical documentation must be retained for 10 years (Art. 18).',
     y, C.red, 34)
+
+  // Dedicated article-by-article gap matrix
+  if (gapMatrix.length > 0) {
+    y = sectionHeader(doc, '4A', 'EU AI Act Dedicated Gap Matrix',
+      'Article-by-article matrix: Art. 9/10/11/12/13/14/15/17/19/72 + Annex IV', y)
+
+    const matrixRows = gapMatrix.map(row => ([
+      { text: s(row.article), bold: true },
+      { text: s(row.status), color: row.status === 'Green' ? C.green : row.status === 'Amber' ? C.amber : C.red, bold: true },
+      { text: s(row.rationale || '') },
+      { text: (Array.isArray(row.gaps) && row.gaps.length > 0) ? row.gaps.map(g => `• ${s(g)}`).join(' ') : 'No material gaps detected' },
+    ]))
+    y = table(doc, ['Article', 'Status', 'Rationale', 'Detected Gaps'], matrixRows, y, [18,20,62,70])
+
+    if (remainingControls.length > 0) {
+      y = subHead(doc, 'Remaining Product/Process Controls (Open Actions)', y)
+      const controlRows = remainingControls.map(c => ([
+        { text: s(c.id || 'CONTROL'), bold: true },
+        { text: s(c.article || 'N/A') },
+        { text: s(c.priority || 'medium'), color: String(c.priority).toLowerCase() === 'high' ? C.red : C.amber, bold: true },
+        { text: s(c.owner || 'Owner not assigned') },
+        { text: s(c.control || '') },
+      ]))
+      y = table(doc, ['Control ID', 'Article', 'Priority', 'Owner', 'Required Control'], controlRows, y, [22,18,18,30,82])
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SECTION 5 — RISK MANAGEMENT (Art. 9 / Annex IV §5)
