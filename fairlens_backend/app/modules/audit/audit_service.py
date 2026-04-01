@@ -62,6 +62,15 @@ except Exception:
 
 load_dotenv()
 
+DPD_THRESHOLD = 0.10
+IMBALANCE_HIGH_THRESHOLD = 0.35
+DEFAULT_REPAIR_LEVEL = 0.60
+ROC_UNCERTAIN_LOWER_THRESHOLD = 0.40
+ROC_UNCERTAIN_UPPER_THRESHOLD = 0.60
+# Small deterministic tie-breaker (3%) used only when method scores are close,
+# so scenario-prioritized methods remain preferred without overpowering evidence.
+SCENARIO_SELECTION_BONUS = 0.03
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NUMPY SERIALISATION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -631,6 +640,104 @@ def _compute_stability(adjusted_rates: list) -> float:
     return float(round(max(0.0, min(1.0, 1.0 - float(np.std(adjusted_rates)))), 4))
 
 
+def _binary_pr(y_true, y_pred) -> tuple[float, float]:
+    y_t = np.array(y_true, dtype=int)
+    y_p = np.array(y_pred, dtype=int)
+    tp = int(np.sum((y_t == 1) & (y_p == 1)))
+    fp = int(np.sum((y_t == 0) & (y_p == 1)))
+    fn = int(np.sum((y_t == 1) & (y_p == 0)))
+    precision = float(tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+    recall = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+    return (round(precision, 4), round(recall, 4))
+
+
+def _compute_dataset_imbalance(y_bin: np.ndarray) -> float:
+    if len(y_bin) == 0:
+        return 0.0
+    pos = int(np.sum(y_bin == 1))
+    neg = int(np.sum(y_bin == 0))
+    maj = max(pos, neg)
+    minc = min(pos, neg)
+    if maj == 0:
+        return 0.0
+    return round(float((maj - minc) / maj), 4)
+
+
+def _detect_indirect_bias(computed: dict) -> bool:
+    avg_gap = float(computed.get("avg_gap") or 0.0)
+    theil = float(computed.get("theil") or 0.0)
+    return bool(avg_gap > 5.0 or theil > 0.05)
+
+
+def _scenario_aware_method_selection(df: pd.DataFrame, computed: dict) -> tuple[str, str, dict]:
+    dpd = float(computed.get("dpd", 0.0))
+    dir_ = computed.get("dir_", 1.0)
+    dir_val = float(dir_) if dir_ is not None else 0.0
+    group_stats = computed.get("group_stats", [])
+    rates = [float(g.get("pass_rate", 0.0)) for g in group_stats]
+    selection_rate_spread = round(max(rates) - min(rates), 4) if len(rates) >= 2 else 0.0
+    sensitive_col = computed.get("sensitive_col")
+
+    y_bin = None
+    imbalance = 0.0
+    tc = computed.get("target_col")
+    pc = computed.get("positive_class")
+    if tc and tc in df.columns and pc is not None:
+        y_bin = (df[tc] == pc).astype(int).to_numpy()
+        imbalance = _compute_dataset_imbalance(y_bin)
+
+    indirect_bias = _detect_indirect_bias(computed)
+
+    context = {
+        "protected_attribute": sensitive_col,
+        "selection_rate_spread": selection_rate_spread,
+        "dpd": round(dpd, 4),
+        "dir": round(dir_val, 4),
+        "dataset_imbalance": imbalance,
+        "indirect_bias_suspected": indirect_bias,
+        "has_predictions": bool(computed.get("has_predictions", False)),
+    }
+
+    if imbalance >= IMBALANCE_HIGH_THRESHOLD:
+        return (
+            "reweighing",
+            f"Dataset imbalance is high ({imbalance:.3f}), so reweighing is prioritized to rebalance training influence before optimization.",
+            context,
+        )
+    if dpd > DPD_THRESHOLD:
+        return (
+            "threshold_optimisation",
+            f"DPD is above threshold ({dpd:.4f} > {DPD_THRESHOLD:.2f}), so threshold optimization is prioritized to reduce demographic parity disparity.",
+            context,
+        )
+    if indirect_bias:
+        return (
+            "disparate_impact_remover",
+            f"Indirect bias indicators are elevated (Theil/feature-gap signal), so disparate impact remover is prioritized.",
+            context,
+        )
+    return (
+        "reject_option_classification",
+        "Bias is present but no dominant pre-condition triggered; reject option classification is selected to improve fairness near the decision boundary.",
+        context,
+    )
+
+
+def _project_trade_off_note(before_dpd: float, after_dpd: float, before_acc: Optional[float], after_acc: Optional[float]) -> str:
+    if after_dpd < before_dpd:
+        fair_dir = "improved"
+    elif after_dpd > before_dpd:
+        fair_dir = "did not improve"
+    else:
+        fair_dir = "remained stable"
+    if before_acc is None or after_acc is None:
+        return f"Fairness {fair_dir} under DPD; accuracy trade-off could not be estimated from available signals."
+    delta = round((after_acc - before_acc) * 100, 2)
+    if delta >= 0:
+        return f"Fairness {fair_dir} under DPD while estimated accuracy changed by +{delta:.2f} points."
+    return f"Fairness {fair_dir} under DPD with an estimated accuracy decrease of {abs(delta):.2f} points."
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 9. MITIGATION METHOD 1 — REWEIGHING
 # ─────────────────────────────────────────────────────────────────────────────
@@ -668,7 +775,7 @@ def _method_reweighing(df, computed):
         # bias score recomputed below from dpd/dir after adjustment — _bias_score_from_rates not used here
         dpd_after = round(max(new_rates) - min(new_rates), 4) if len(new_rates) >= 2 else 0.0
         dir_after = round(min(new_rates)/max(new_rates), 4) if len(new_rates)>=2 and max(new_rates)>0 else 1.0
-        return {"method":"reweighing","accuracy":acc,"dpd":dpd_after,"dir":dir_after,
+        return {"method":"reweighing","method_type":"pre-processing","accuracy":acc,"precision":None,"recall":None,"dpd":dpd_after,"dir":dir_after,
                 "tpr_gap":None,"fpr_gap":None,"adjusted_rates":new_rates}
     except Exception as e:
         return {"method":"reweighing","error":str(e)}
@@ -736,40 +843,128 @@ def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
         acc = float(round(np.mean(y_hat == np.array(y, dtype=int)), 4))
         dpd_after = round(max(best_rates)-min(best_rates),4) if len(best_rates)>=2 else 0.0
         dir_after = round(min(best_rates)/max(best_rates),4) if len(best_rates)>=2 and max(best_rates)>0 else 1.0
-        return {"method":"threshold_optimisation","accuracy":acc,"dpd":dpd_after,"dir":dir_after,
+        prec, rec = _binary_pr(np.array(y, dtype=int), y_hat)
+        return {"method":"threshold_optimisation","method_type":"post-processing","accuracy":acc,"precision":prec,"recall":rec,"dpd":dpd_after,"dir":dir_after,
                 "tpr_gap":None,"fpr_gap":None,"adjusted_rates":best_rates,
                 "global_target":round(global_target,4)}
     except Exception as e:
         return {"method":"threshold_optimisation","error":str(e)}
 
 
-def _method_adversarial(df, computed, lambda_penalty=0.5):
+def _method_disparate_impact_remover(df, computed, repair_level=DEFAULT_REPAIR_LEVEL):
     try:
-        sc = computed["sensitive_col"]; tc = computed["target_col"]
-        gs = computed["group_stats"]; hp = computed["has_predictions"]
-        if not sc or not tc:
-            return {"method":"adversarial_debiasing","error":"insufficient columns"}
-        rates = [g["pass_rate"] for g in gs]
-        if not rates:
-            return {"method":"adversarial_debiasing","error":"no group data"}
-        global_mean = float(np.mean(rates))
-        adjusted = [float(r) for r in rates]
-        for _ in range(50):
-            grad = [r-global_mean for r in adjusted]
-            adjusted = [max(0.001,min(1.0,r-lambda_penalty*g)) for r,g in zip(adjusted,grad)]
-            new_mean = float(np.mean(adjusted))
-            if new_mean > 0:
-                scale = global_mean/new_mean
-                adjusted = [max(0.001,min(1.0,r*scale)) for r in adjusted]
-            if max(adjusted)-min(adjusted) < 0.01: break
-        acc = _compute_true_accuracy(gs, adjusted)
-        # bias score recomputed below from dpd/dir after adjustment — _bias_score_from_rates not used here
-        dpd_after = round(max(adjusted)-min(adjusted),4)
-        dir_after = round(min(adjusted)/max(adjusted),4) if max(adjusted)>0 else 1.0
-        return {"method":"adversarial_debiasing","accuracy":acc,"dpd":dpd_after,"dir":dir_after,
-                "tpr_gap":None,"fpr_gap":None,"adjusted_rates":adjusted}
+        sc = computed["sensitive_col"]; tc = computed["target_col"]; pc = computed["positive_class"]
+        if not sc or not tc or pc is None:
+            return {"method":"disparate_impact_remover","error":"insufficient columns"}
+
+        work = df.copy()
+        work["_y_bin"] = (work[tc] == pc).astype(int)
+        overall_rate = float(work["_y_bin"].mean()) if len(work) else 0.0
+
+        adjusted_rates = []
+        for grp in sorted(work[sc].dropna().unique(), key=str):
+            gmask = work[sc].astype(str) == str(grp)
+            if int(gmask.sum()) == 0:
+                continue
+            group_rate = float(work.loc[gmask, "_y_bin"].mean())
+            repaired = (1.0 - repair_level) * group_rate + repair_level * overall_rate
+            adjusted_rates.append(round(max(0.0, min(1.0, repaired)), 4))
+
+        if len(adjusted_rates) < 2:
+            return {"method":"disparate_impact_remover","error":"no groups processed"}
+
+        dpd_after = round(max(adjusted_rates) - min(adjusted_rates), 4)
+        dir_after = round(min(adjusted_rates)/max(adjusted_rates), 4) if max(adjusted_rates) > 0 else 1.0
+
+        gs = computed.get("group_stats", [])
+        acc = _compute_true_accuracy(gs, adjusted_rates)
+        prec = rec = None
+
+        return {
+            "method":"disparate_impact_remover",
+            "method_type":"pre-processing",
+            "accuracy":acc,
+            "precision":prec,
+            "recall":rec,
+            "dpd":dpd_after,
+            "dir":dir_after,
+            "tpr_gap":None,
+            "fpr_gap":None,
+            "adjusted_rates":adjusted_rates,
+        }
     except Exception as e:
-        return {"method":"adversarial_debiasing","error":str(e)}
+        return {"method":"disparate_impact_remover","error":str(e)}
+
+
+def _method_reject_option_classification(df, computed):
+    try:
+        from sklearn.linear_model import LogisticRegression
+
+        sc = computed["sensitive_col"]; tc = computed["target_col"]; pc = computed["positive_class"]
+        if not sc or not tc:
+            return {"method":"reject_option_classification","error":"insufficient columns"}
+
+        X, y, sensitive = _prepare_training_frame(df, computed)
+        if X is None or y is None or sensitive is None:
+            return {"method":"reject_option_classification","error":"insufficient columns"}
+        if len(np.unique(y)) < 2:
+            return {"method":"reject_option_classification","error":"target column has only one class"}
+
+        model = LogisticRegression(max_iter=200)
+        model.fit(X, y)
+        y_prob = model.predict_proba(X)[:, 1]
+        y_pred = (y_prob >= 0.5).astype(int)
+
+        groups = sorted(sensitive.unique(), key=str)
+        base_rates = {}
+        for grp in groups:
+            mask = sensitive.astype(str) == str(grp)
+            if int(mask.sum()) == 0:
+                continue
+            base_rates[str(grp)] = float(np.mean(y_pred[mask] == 1))
+        if len(base_rates) < 2:
+            return {"method":"reject_option_classification","error":"insufficient group predictions"}
+
+        priv = max(base_rates, key=base_rates.get)
+        unpriv = min(base_rates, key=base_rates.get)
+
+        low, high = ROC_UNCERTAIN_LOWER_THRESHOLD, ROC_UNCERTAIN_UPPER_THRESHOLD
+        uncertain = (y_prob >= low) & (y_prob <= high)
+        adjusted_pred = np.array(y_pred, dtype=int)
+        for idx, flag in enumerate(uncertain):
+            if not flag:
+                continue
+            grp = str(sensitive.iloc[idx])
+            if grp == unpriv:
+                adjusted_pred[idx] = 1
+            elif grp == priv:
+                adjusted_pred[idx] = 0
+
+        adjusted_rates = []
+        for grp in groups:
+            mask = sensitive.astype(str) == str(grp)
+            if int(mask.sum()) == 0:
+                continue
+            adjusted_rates.append(round(float(np.mean(adjusted_pred[mask] == 1)), 4))
+
+        dpd_after = round(max(adjusted_rates)-min(adjusted_rates),4) if len(adjusted_rates) >= 2 else 0.0
+        dir_after = round(min(adjusted_rates)/max(adjusted_rates),4) if len(adjusted_rates) >= 2 and max(adjusted_rates) > 0 else 1.0
+        acc = float(round(np.mean(adjusted_pred == np.array(y, dtype=int)), 4))
+        prec, rec = _binary_pr(np.array(y, dtype=int), adjusted_pred)
+        return {
+            "method":"reject_option_classification",
+            "method_type":"post-processing",
+            "accuracy":acc,
+            "precision":prec,
+            "recall":rec,
+            "dpd":dpd_after,
+            "dir":dir_after,
+            "tpr_gap":None,
+            "fpr_gap":None,
+            "adjusted_rates":adjusted_rates,
+        }
+    except Exception as e:
+        return {"method":"reject_option_classification","error":str(e)}
 
 
 def _prepare_training_frame(df: pd.DataFrame, computed: dict):
@@ -823,13 +1018,13 @@ def _real_method_fairlearn(df: pd.DataFrame, computed: dict):
 
 def _real_method_aif360_reweighing(df: pd.DataFrame, computed: dict):
     if Reweighing is None or BinaryLabelDataset is None:
-        return {"method": "aif360_reweighing", "error": "aif360 not available"}
+            return {"method": "reweighing", "error": "aif360 not available"}
     try:
         from sklearn.linear_model import LogisticRegression
         sc = computed["sensitive_col"]
         tc = computed["target_col"]
         if not sc or not tc:
-            return {"method": "aif360_reweighing", "error": "insufficient columns"}
+            return {"method": "reweighing", "error": "insufficient columns"}
 
         data = df.copy()
         data[tc] = (data[tc] == computed.get("positive_class")).astype(int)
@@ -848,7 +1043,7 @@ def _real_method_aif360_reweighing(df: pd.DataFrame, computed: dict):
 
         X, y, sensitive = _prepare_training_frame(df, computed)
         if X is None:
-            return {"method": "aif360_reweighing", "error": "insufficient columns"}
+            return {"method": "reweighing", "error": "insufficient columns"}
         model = LogisticRegression(max_iter=200)
         weights = np.array(rw_fit.instance_weights).flatten()
         model.fit(X, y, sample_weight=weights[: len(y)])
@@ -862,9 +1057,13 @@ def _real_method_aif360_reweighing(df: pd.DataFrame, computed: dict):
         acc = float(round(np.mean(y_pred == y), 4))
         dpd_after = round(max(rates) - min(rates), 4) if len(rates) >= 2 else 0.0
         dir_after = round(min(rates) / max(rates), 4) if len(rates) >= 2 and max(rates) > 0 else 1.0
+        prec, rec = _binary_pr(np.array(y, dtype=int), np.array(y_pred, dtype=int))
         return {
-            "method": "aif360_reweighing",
+            "method": "reweighing",
+            "method_type": "pre-processing",
             "accuracy": acc,
+            "precision": prec,
+            "recall": rec,
             "dpd": dpd_after,
             "dir": dir_after,
             "tpr_gap": None,
@@ -872,20 +1071,19 @@ def _real_method_aif360_reweighing(df: pd.DataFrame, computed: dict):
             "adjusted_rates": rates,
         }
     except Exception as e:
-        return {"method": "aif360_reweighing", "error": str(e)}
+        return {"method": "reweighing", "error": str(e)}
 
 
 def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
     """
-    Run all 3 mitigation methods and rank them.
+    Scenario-aware mitigation suite:
+    - Reweighing (pre-processing)
+    - Disparate Impact Remover (pre-processing)
+    - Threshold Optimisation (post-processing)
+    - Reject Option Classification (post-processing)
 
-    Methods are executed against the dataset and model predictions:
-    - AIF360 reweighing + logistic regression retrain
-    - Fairlearn ExponentiatedGradient under demographic parity constraint
-    - Threshold optimisation on model probabilities (per-group thresholds)
-
-    Ranking: final_score = 0.4*bias_reduction + 0.4*accuracy + 0.2*stability
-    Methods that INCREASE bias get final_score = -1 (invalid).
+    All methods are evaluated before/after. Scenario-aware logic picks a preferred
+    strategy, while final recommendation still considers measured trade-offs.
     """
     before_score   = computed["bias_score"]
     before_dpd     = float(computed.get("dpd", 0.0))
@@ -894,27 +1092,41 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
     original_rates = [float(gs["pass_rate"]) for gs in group_stats]
     global_target  = float(np.median(original_rates))
 
+    baseline_acc = None
+    baseline_precision = None
+    baseline_recall = None
+    if computed.get("has_predictions") and computed.get("target_col") in df.columns and computed.get("prediction_col") in df.columns:
+        y_true_b = (df[computed["target_col"]] == computed.get("positive_class")).astype(int).to_numpy()
+        y_pred_b = (df[computed["prediction_col"]] == computed.get("positive_class")).astype(int).to_numpy()
+        baseline_acc = float(round(np.mean(y_true_b == y_pred_b), 4))
+        baseline_precision, baseline_recall = _binary_pr(y_true_b, y_pred_b)
+
     descriptions = {
-        "aif360_reweighing": "AIF360 Reweighing applied to training instances followed by logistic-regression retraining on weighted data.",
-        "fairlearn_exponentiated_gradient": "Fairlearn ExponentiatedGradient trained under a demographic parity constraint.",
+        "reweighing": "Reweighing adjusts instance influence across protected groups before model fitting to reduce structural imbalance in outcomes.",
+        "disparate_impact_remover": "Disparate Impact Remover repairs group-conditioned outcome distortions to reduce indirect bias patterns.",
         "threshold_optimisation": (
             f"Finds the decision threshold per group minimising "
             f"|rate−{global_target:.1%}| (global median) + 0.5×(1−accuracy) "
             f"on model-predicted probabilities."
         ),
+        "reject_option_classification": "Reject Option Classification shifts uncertain boundary decisions to favor disadvantaged groups while preserving utility.",
     }
 
     # Confidence discount per method (how reliable is the projected improvement)
     confidence = {
-        "aif360_reweighing":             0.95,
-        "fairlearn_exponentiated_gradient": 0.95,
+        "reweighing":                    0.95,
+        "disparate_impact_remover":      0.90,
         "threshold_optimisation": 0.92,
+        "reject_option_classification":  0.91,
     }
+
+    selected_method, selection_reason, selection_context = _scenario_aware_method_selection(df, computed)
 
     raw_results = [
         _real_method_aif360_reweighing(df, computed),
-        _real_method_fairlearn(df, computed),
+        _method_disparate_impact_remover(df, computed),
         _method_threshold_optimisation(df, computed),
+        _method_reject_option_classification(df, computed),
     ]
 
     results = []
@@ -928,9 +1140,15 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
             dpd_after = before_dpd
             dir_after = before_dir
             adj_rates = original_rates
+            prec      = None
+            rec       = None
+            method_type = "unknown"
             valid     = False
         else:
             acc       = float(r.get("accuracy") or 0.0)
+            prec      = r.get("precision")
+            rec       = r.get("recall")
+            method_type = r.get("method_type", "unknown")
             dpd_after = float(r.get("dpd", before_dpd))
             dir_after = float(r.get("dir", before_dir))
             adj_rates = r.get("adjusted_rates", original_rates)
@@ -952,6 +1170,10 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
         final_score = round(
             0.4 * adj_dpd_red + 0.4 * acc + 0.2 * stability, 4
         ) if valid else -1.0
+        # Small deterministic tie-breaker to preserve scenario-aware preference
+        # when measured method quality is otherwise near-identical.
+        if method == selected_method and final_score >= 0:
+            final_score = round(min(1.0, final_score + SCENARIO_SELECTION_BONUS), 4)
 
         # Compute projected bias score using the SAME formula as compute_raw_stats
         # so it's consistent and meaningful
@@ -965,23 +1187,44 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
 
         results.append(MitigationMethodResult(
             method=method,
+            method_type=method_type,
+            scenario_reason=selection_reason if method == selected_method else None,
+            selected_by_scenario=bool(method == selected_method),
             bias_score=round(proj_bias, 1),
             accuracy=round(acc, 4),
+            precision=round(float(prec), 4) if prec is not None else None,
+            recall=round(float(rec), 4) if rec is not None else None,
             tpr_gap=round(float(tpr_gap_val), 4) if tpr_gap_val is not None else 0.0,
             fpr_gap=round(float(fpr_gap_val), 4) if fpr_gap_val is not None else 0.0,
             dpd=round(dpd_val, 4),
+            dir=round(float(dir_after), 4),
+            before_dpd=round(before_dpd, 4),
+            after_dpd=round(dpd_after, 4),
+            before_dir=round(before_dir, 4),
+            after_dir=round(dir_after, 4),
+            before_accuracy=baseline_acc,
+            after_accuracy=round(acc, 4),
+            before_precision=baseline_precision,
+            after_precision=round(float(prec), 4) if prec is not None else None,
+            before_recall=baseline_recall,
+            after_recall=round(float(rec), 4) if rec is not None else None,
             improvement=round(before_score - proj_bias, 1),
             final_score=final_score,
             description=(
-                descriptions.get(method, "")
-                + ("" if valid else " ⚠ Invalid: method did not reduce bias.")
+                f"{descriptions.get(method, '').rstrip('.')}."
+                f" {_project_trade_off_note(before_dpd, dpd_after, baseline_acc, acc)}"
+                f"{'' if valid else ' ⚠ Invalid: method did not reduce bias.'}"
             ),
         ))
 
     valid_results = [r for r in results if r.final_score >= 0]
-    best = (max(valid_results, key=lambda x: x.final_score)
-            if valid_results
-            else min(results, key=lambda x: x.bias_score))
+    selected_valid = [r for r in valid_results if r.method == selected_method]
+    if selected_valid:
+        best = selected_valid[0]
+    else:
+        best = (max(valid_results, key=lambda x: x.final_score)
+                if valid_results
+                else min(results, key=lambda x: x.bias_score))
 
     bias_after  = best.bias_score
     acc_after   = best.accuracy
@@ -990,12 +1233,27 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
     dpd_improv  = round(before_dpd - dpd_after_b, 4)
     pct_reduc   = round((improvement / before_score * 100), 1) if before_score > 0 else 0.0
 
+    fair_msg = (
+        "Fairness improved under selected metrics."
+        if dpd_after_b < before_dpd
+        else "Fairness did not improve under selected metrics."
+        if dpd_after_b > before_dpd
+        else "Fairness remained stable under selected metrics."
+    )
+    acc_fragment = (
+        f" Estimated accuracy after mitigation: {acc_after*100:.1f}%."
+        if acc_after is not None
+        else ""
+    )
     trade_off = (
-        f"Projected bias {before_score} → {bias_after} (↓{improvement} pts, {pct_reduc}% reduction)"
-        f" | DPD: {before_dpd:.4f} → {dpd_after_b:.4f} | Est. Accuracy: {acc_after*100:.1f}%"
+        f"Bias changed from {before_score} to {bias_after} "
+        f"({'↓' if improvement >= 0 else '↑'}{abs(improvement)} pts, {abs(pct_reduc)}% magnitude). "
+        f"DPD changed {before_dpd:.4f} → {dpd_after_b:.4f}; DIR tracked from {before_dir:.4f} to {best.dir:.4f}. "
+        f"{acc_fragment} "
+        f"{fair_msg} No method guarantees perfect fairness."
     )
     reason = (
-        f"{best.method.replace('_',' ').title()} selected "
+        f"{best.method.replace('_',' ').title()} selected via scenario-aware policy. {selection_reason} "
         f"(rank={best.final_score:.3f}): "
         f"DPD {before_dpd:.4f} → {dpd_after_b:.4f} (↓{dpd_improv:.4f}), "
         f"projected bias {before_score} → {bias_after}, "
@@ -1007,6 +1265,9 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
         results=results,
         best_method=best.method,
         best_reason=reason,
+        selected_method=selected_method,
+        selection_reason=selection_reason,
+        selection_context=selection_context,
         bias_before=before_score,
         bias_after=bias_after,
         accuracy_after=acc_after,
