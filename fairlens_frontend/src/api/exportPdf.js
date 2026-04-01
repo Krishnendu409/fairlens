@@ -1011,6 +1011,47 @@ export async function exportAuditToPdf(result, description) {
   doc.save(`FairLens_Compliance_Audit_${Date.now()}.pdf`)
 }
 
+export async function exportAuditToPdfBlob(result, description) {
+  const doc  = new jsPDF({unit:'mm',format:'a4'})
+  let y = M
+  const ts = new Date().toLocaleString()
+  const bias = n(result.bias_score)
+  const level = s(result.bias_level || '')
+  const risk = s(result.risk_label || '')
+  const summary = s(result.summary || '')
+  const findings = (result.key_findings || []).map(s).filter(Boolean)
+  const recs = (result.recommendations || []).map(s).filter(Boolean)
+  doc.setFillColor(...C.primary); doc.rect(0, 0, PW, 24, 'F')
+  doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.setFontSize(16)
+  doc.text('FairLens Compliance Audit Report', M, 14)
+  doc.setFont('helvetica','normal'); doc.setFontSize(9)
+  doc.text(`Generated: ${ts}`, PW-M, 14, {align:'right'})
+  y = 30
+  doc.setTextColor(...C.text)
+  doc.setFont('helvetica','bold'); doc.setFontSize(12)
+  doc.text('Overview', M, y); y += 7
+  doc.setFont('helvetica','normal'); doc.setFontSize(10)
+  doc.text(doc.splitTextToSize(`Bias: ${bias} (${level}) | Risk: ${risk}`, CW), M, y); y += 10
+  if (summary) {
+    doc.text(doc.splitTextToSize(summary, CW), M, y); y += 12
+  }
+  doc.setFont('helvetica','bold'); doc.text('Key Findings', M, y); y += 6
+  doc.setFont('helvetica','normal')
+  findings.slice(0, 6).forEach((f) => {
+    doc.text(doc.splitTextToSize(`• ${f}`, CW), M, y); y += 5
+  })
+  y += 3
+  doc.setFont('helvetica','bold'); doc.text('Recommendations', M, y); y += 6
+  doc.setFont('helvetica','normal')
+  recs.slice(0, 6).forEach((r) => {
+    doc.text(doc.splitTextToSize(`• ${r}`, CW), M, y); y += 5
+  })
+  y += 5
+  doc.setFontSize(8); doc.setTextColor(...C.muted)
+  doc.text(doc.splitTextToSize(`Dataset context: ${s(description || '')}`, CW), M, y)
+  return doc.output('blob')
+}
+
 // ── Text-mode export (kept for /results page) ───────────────────────────────
 export async function exportToPdf(prompt, aiResponse, result) {
   const doc = new jsPDF({unit:'mm',format:'a4'})
@@ -1028,4 +1069,22 @@ export async function exportToPdf(prompt, aiResponse, result) {
   doc.setFontSize(9.5); doc.setTextColor(...C.text); doc.setFont('helvetica','normal')
   const aL = doc.splitTextToSize(s(result.unbiased_response)||'', 170); doc.text(aL, M, y)
   doc.save(`FairLens_TextAudit_${Date.now()}.pdf`)
+}
+
+export async function exportToPdfBlob(prompt, aiResponse, result) {
+  const doc = new jsPDF({unit:'mm',format:'a4'})
+  let y = 25
+  doc.setFontSize(22); doc.setTextColor(...C.primary); doc.setFont('helvetica','bold')
+  doc.text('Text Fairness Audit', M, y); y+=10
+  doc.setFontSize(10); doc.setTextColor(...C.text); doc.setFont('helvetica','normal')
+  doc.text(`Score: ${result.bias_score}/100 — ${result.bias_level}`, M, y); y+=20
+  doc.setFontSize(13); doc.setTextColor(...C.primary); doc.setFont('helvetica','bold')
+  doc.text('Original Text', M, y); y+=8
+  doc.setFontSize(9.5); doc.setTextColor(...C.text); doc.setFont('helvetica','normal')
+  const pL = doc.splitTextToSize(s(prompt)||'', 170); doc.text(pL, M, y); y+=pL.length*5+15
+  doc.setFontSize(13); doc.setTextColor(...C.primary); doc.setFont('helvetica','bold')
+  doc.text('Unbiased Rewrite', M, y); y+=8
+  doc.setFontSize(9.5); doc.setTextColor(...C.text); doc.setFont('helvetica','normal')
+  const aL = doc.splitTextToSize(s(result.unbiased_response)||'', 170); doc.text(aL, M, y)
+  return doc.output('blob')
 }

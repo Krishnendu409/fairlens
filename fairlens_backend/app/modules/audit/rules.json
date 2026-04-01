@@ -1,0 +1,33 @@
+{
+  "article_9": {
+    "name": "Risk management system",
+    "thresholds": {
+      "bias_score_amber_max": 45,
+      "bias_score_red_min": 70
+    }
+  },
+  "article_10": {
+    "name": "Data and data governance",
+    "thresholds": {
+      "dpd_max": 0.1,
+      "dir_min": 0.8,
+      "theil_max": 0.05
+    }
+  },
+  "article_13": {
+    "name": "Transparency and provision of information",
+    "required_fields": [
+      "summary",
+      "key_findings",
+      "recommendations"
+    ]
+  },
+  "article_15": {
+    "name": "Accuracy, robustness and cybersecurity",
+    "thresholds": {
+      "min_accuracy": 0.6,
+      "max_tpr_gap": 0.1,
+      "max_fpr_gap": 0.1
+    }
+  }
+}

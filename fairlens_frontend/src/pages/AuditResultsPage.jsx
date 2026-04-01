@@ -6,7 +6,7 @@ import {
   CartesianGrid, Cell, LabelList, Legend,
 } from 'recharts'
 import { sendChatMessage } from '../api/audit'
-import { exportAuditToPdf } from '../api/exportPdf'
+import { exportAuditToPdf, exportAuditToPdfBlob } from '../api/exportPdf'
 import BiasGauge from '../components/BiasGauge'
 import ThemeToggle from '../components/ThemeToggle'
 import Icon from '../components/Icon'
@@ -24,7 +24,7 @@ function MetricCard({ metric, plainLang }) {
   return (
     <div className={`${styles.metricCard} ${metric.flagged ? styles.metricFlagged : styles.metricOk}`}>
       <div className={styles.metricHeader}>
-        <span className={styles.metricName}>{metric.name}</span>
+        <span className={styles.metricName} title={metric.key}>{metric.name}</span>
         <span className={`${styles.badge} ${metric.flagged ? styles.badgeRed : styles.badgeGreen}`}>
           {metric.flagged ? 'Flagged' : 'OK'}
         </span>
@@ -566,6 +566,7 @@ export default function AuditResultsPage() {
   const [activeTab, setActiveTab] = useState('summary')
   const [shareState, setShareState] = useState('idle')
   const [exporting, setExporting] = useState(false)
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState('')
   const [showBadgeModal, setShowBadgeModal] = useState(false)
   const [searchParams] = useSearchParams()
 
@@ -662,6 +663,15 @@ export default function AuditResultsPage() {
     try { await exportAuditToPdf(result, datasetDescription) } finally { setExporting(false) }
   }
 
+  async function handlePreviewPdf() {
+    const blob = await exportAuditToPdfBlob(result, datasetDescription)
+    const nextUrl = URL.createObjectURL(blob)
+    setPdfPreviewUrl(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return nextUrl
+    })
+  }
+
   const tabBadges = {
     diagnosis: root_causes.filter(c => !c.includes('No significant')).length,
     evidence: flaggedMetrics.length,
@@ -691,6 +701,9 @@ export default function AuditResultsPage() {
           <button className={styles.actionBtn} onClick={handleExport} disabled={exporting}>
             <Icon name="pdf" size={13}/> {exporting ? 'Generating...' : 'EU Compliance Report'}
           </button>
+          <button className={styles.actionBtn} onClick={handlePreviewPdf}>
+            <Icon name="chart" size={13}/> Preview PDF
+          </button>
         </div>
       </header>
 
@@ -709,6 +722,12 @@ export default function AuditResultsPage() {
 
       {/* ── Tab Content ── */}
       <div className={styles.main}>
+        {pdfPreviewUrl && (
+          <div className={styles.card}>
+            <h3 className={styles.sectionTitle}>PDF Preview</h3>
+            <iframe title="Audit PDF Preview" src={pdfPreviewUrl} style={{ width: '100%', minHeight: 500, border: '1px solid var(--border)', borderRadius: 8 }} />
+          </div>
+        )}
 
         {/* ══ SUMMARY ══ */}
         {activeTab === 'summary' && (

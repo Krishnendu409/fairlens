@@ -20,6 +20,7 @@ class AuditRequest(BaseModel):
     sensitive_column: Optional[str] = None
     sensitive_column_2: Optional[str] = None
     prediction_column: Optional[str] = None
+    privacy_mode: bool = False
 
 
 class ChatRequest(BaseModel):
@@ -157,6 +158,9 @@ class AuditResponse(BaseModel):
     primary_numeric_column: Optional[str] = None
     sample_rows: List[Dict[str, Any]] = []
     group_rates_map: Dict[str, float] = {}
+    compliance: Optional[Dict[str, Any]] = None
+    integrity_hash: Optional[str] = None
+    audit_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):

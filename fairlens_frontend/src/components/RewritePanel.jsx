@@ -5,6 +5,9 @@ import styles from './RewritePanel.module.css'
 
 export default function RewritePanel({ original, unbiased, flaggedPhrases }) {
   const [copied, setCopied] = useState(false)
+  const originalWords = (original || '').split(/\s+/).filter(Boolean).length
+  const unbiasedWords = (unbiased || '').split(/\s+/).filter(Boolean).length
+  const delta = unbiasedWords - originalWords
 
   function copyUnbiased() {
     navigator.clipboard.writeText(unbiased).then(() => {
@@ -44,6 +47,9 @@ export default function RewritePanel({ original, unbiased, flaggedPhrases }) {
           </button>
         </div>
         <p className={styles.text}>{unbiased}</p>
+        <p className={styles.diffMeta}>
+          Diff: {delta >= 0 ? `+${delta}` : `${delta}`} words ({originalWords} → {unbiasedWords})
+        </p>
       </div>
     </div>
   )

@@ -44,6 +44,21 @@ from app.schemas.audit_schema import (
     ConfusionMatrix, StatisticalTest,
     MitigationMethodResult, MitigationSummary,
 )
+from app.modules.audit.audit_utils import compute_integrity_hash
+from app.modules.audit.compliance_engine import evaluate_eu_ai_act
+from app.modules.audit.compliance_store import JSONStorageManager
+
+try:
+    from fairlearn.reductions import DemographicParity, ExponentiatedGradient
+except Exception:
+    DemographicParity = None
+    ExponentiatedGradient = None
+try:
+    from aif360.algorithms.preprocessing import Reweighing
+    from aif360.datasets import BinaryLabelDataset
+except Exception:
+    Reweighing = None
+    BinaryLabelDataset = None
 
 load_dotenv()
 
@@ -727,6 +742,109 @@ def _method_adversarial(df, computed, lambda_penalty=0.5):
         return {"method":"adversarial_debiasing","error":str(e)}
 
 
+def _prepare_training_frame(df: pd.DataFrame, computed: dict):
+    sc = computed["sensitive_col"]
+    tc = computed["target_col"]
+    if not sc or not tc or sc not in df.columns or tc not in df.columns:
+        return None, None, None
+    train_df = df[[c for c in df.columns if c != tc]].copy()
+    y_raw = df[tc].copy()
+    y = (y_raw == computed.get("positive_class")).astype(int)
+    sensitive = df[sc].astype(str)
+    train_df = train_df.drop(columns=[sc], errors="ignore")
+    train_df = pd.get_dummies(train_df, drop_first=False)
+    train_df = train_df.fillna(0)
+    return train_df, y, sensitive
+
+
+def _real_method_fairlearn(df: pd.DataFrame, computed: dict):
+    if DemographicParity is None or ExponentiatedGradient is None:
+        return {"method": "fairlearn_exponentiated_gradient", "error": "fairlearn not available"}
+    try:
+        from sklearn.linear_model import LogisticRegression
+        X, y, sensitive = _prepare_training_frame(df, computed)
+        if X is None:
+            return {"method": "fairlearn_exponentiated_gradient", "error": "insufficient columns"}
+        base = LogisticRegression(max_iter=200)
+        mitigator = ExponentiatedGradient(base, constraints=DemographicParity())
+        mitigator.fit(X, y, sensitive_features=sensitive)
+        y_pred = mitigator.predict(X)
+
+        groups = sorted(sensitive.unique(), key=str)
+        rates = []
+        for grp in groups:
+            mask = sensitive.astype(str) == str(grp)
+            rates.append(round(float(np.mean(y_pred[mask] == 1)), 4))
+        acc = float(round(np.mean(y_pred == y), 4))
+        dpd_after = round(max(rates) - min(rates), 4) if len(rates) >= 2 else 0.0
+        dir_after = round(min(rates) / max(rates), 4) if len(rates) >= 2 and max(rates) > 0 else 1.0
+        return {
+            "method": "fairlearn_exponentiated_gradient",
+            "accuracy": acc,
+            "dpd": dpd_after,
+            "dir": dir_after,
+            "tpr_gap": None,
+            "fpr_gap": None,
+            "adjusted_rates": rates,
+        }
+    except Exception as e:
+        return {"method": "fairlearn_exponentiated_gradient", "error": str(e)}
+
+
+def _real_method_aif360_reweighing(df: pd.DataFrame, computed: dict):
+    if Reweighing is None or BinaryLabelDataset is None:
+        return {"method": "aif360_reweighing", "error": "aif360 not available"}
+    try:
+        from sklearn.linear_model import LogisticRegression
+        sc = computed["sensitive_col"]
+        tc = computed["target_col"]
+        if not sc or not tc:
+            return {"method": "aif360_reweighing", "error": "insufficient columns"}
+
+        data = df.copy()
+        data[tc] = (data[tc] == computed.get("positive_class")).astype(int)
+        if not pd.api.types.is_numeric_dtype(data[sc]):
+            data[sc] = pd.factorize(data[sc].astype(str))[0]
+
+        bld = BinaryLabelDataset(
+            favorable_label=1,
+            unfavorable_label=0,
+            df=data[[c for c in data.columns if c in df.columns]],
+            label_names=[tc],
+            protected_attribute_names=[sc],
+        )
+        rw = Reweighing(unprivileged_groups=[{sc: 0}], privileged_groups=[{sc: 1}])
+        rw_fit = rw.fit_transform(bld)
+
+        X, y, sensitive = _prepare_training_frame(df, computed)
+        if X is None:
+            return {"method": "aif360_reweighing", "error": "insufficient columns"}
+        model = LogisticRegression(max_iter=200)
+        weights = np.array(rw_fit.instance_weights).flatten()
+        model.fit(X, y, sample_weight=weights[: len(y)])
+        y_pred = model.predict(X)
+
+        groups = sorted(sensitive.unique(), key=str)
+        rates = []
+        for grp in groups:
+            mask = sensitive.astype(str) == str(grp)
+            rates.append(round(float(np.mean(y_pred[mask] == 1)), 4))
+        acc = float(round(np.mean(y_pred == y), 4))
+        dpd_after = round(max(rates) - min(rates), 4) if len(rates) >= 2 else 0.0
+        dir_after = round(min(rates) / max(rates), 4) if len(rates) >= 2 and max(rates) > 0 else 1.0
+        return {
+            "method": "aif360_reweighing",
+            "accuracy": acc,
+            "dpd": dpd_after,
+            "dir": dir_after,
+            "tpr_gap": None,
+            "fpr_gap": None,
+            "adjusted_rates": rates,
+        }
+    except Exception as e:
+        return {"method": "aif360_reweighing", "error": str(e)}
+
+
 def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
     """
     Run all 3 mitigation methods and rank them.
@@ -750,33 +868,26 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
     global_target  = float(np.median(original_rates))
 
     descriptions = {
-        "reweighing": (
-            f"Assigns sample weights w(g,y)=P(Y=y)·P(G=g)/P(Y=y,G=g). "
-            f"Projected DPD converges toward 0 after retraining. "
-            f"Confidence-discounted: actual improvement may vary."
-        ),
+        "aif360_reweighing": "AIF360 Reweighing applies sample reweights before model fit to reduce group bias.",
+        "fairlearn_exponentiated_gradient": "Fairlearn ExponentiatedGradient optimizes classifier under demographic parity constraints.",
         "threshold_optimisation": (
             f"Finds the decision threshold per group minimising "
             f"|rate−{global_target:.1%}| (global median) + 0.5×(1−accuracy). "
             f"Post-processing: no retraining required."
         ),
-        "adversarial_debiasing": (
-            f"Iterative gradient equalisation: rate_g ← rate_g − 0.5×(rate_g−mean). "
-            f"Preserves global mean; converges when max−min < 1%."
-        ),
     }
 
     # Confidence discount per method (how reliable is the projected improvement)
     confidence = {
-        "reweighing":             0.85,   # requires retraining — projected
-        "threshold_optimisation": 0.92,   # post-processing — fairly reliable
-        "adversarial_debiasing":  0.80,   # iterative simulation — optimistic
+        "aif360_reweighing":             0.95,
+        "fairlearn_exponentiated_gradient": 0.95,
+        "threshold_optimisation": 0.92,
     }
 
     raw_results = [
-        _method_reweighing(df, computed),
+        _real_method_aif360_reweighing(df, computed),
+        _real_method_fairlearn(df, computed),
         _method_threshold_optimisation(df, computed),
-        _method_adversarial(df, computed),
     ]
 
     results = []
@@ -1282,20 +1393,71 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
     root_causes      = generate_root_causes(stats)
     bias_origin_dict = detect_bias_origin(stats)
     mitigation       = run_mitigation(df, c)
+    compliance_payload = evaluate_eu_ai_act(
+        bias_score=c["bias_score"],
+        metrics=c["metrics"],
+        group_stats=c["group_stats"],
+        summary="",
+        key_findings=[],
+        recommendations=[],
+    )
     prompt           = build_prompt(stats, root_causes, reliability_dict)
-    try:
-        ai = await call_gemini(prompt)
-    except Exception as gemini_err:
-        raise RuntimeError(f"Gemini call failed: {gemini_err}")
+    if request.privacy_mode:
+        ai = {
+            "summary": "Privacy mode enabled. Narrative generation skipped; metrics computed locally.",
+            "key_findings": [
+                "No external API call was made in privacy mode.",
+                f"Bias score computed locally: {c['bias_score']}.",
+            ],
+            "recommendations": ["Disable privacy mode if you want generated narrative text."],
+            "metric_interpretations": {},
+            "plain_language": {"overall": "Privacy mode run with local computation only."},
+        }
+    else:
+        try:
+            ai = await call_gemini(prompt)
+        except Exception as gemini_err:
+            raise RuntimeError(f"Gemini call failed: {gemini_err}")
 
     # Ensure ai is a dict with expected structure
     if not isinstance(ai, dict):
         ai = {}
 
     try:
-        return merge_into_response(
+        response = merge_into_response(
             stats, ai, root_causes, bias_origin_dict,
             mitigation, stat_test, reliability_dict,
         )
+        final_compliance = evaluate_eu_ai_act(
+            bias_score=c["bias_score"],
+            metrics=c["metrics"],
+            group_stats=c["group_stats"],
+            summary=response.summary,
+            key_findings=response.key_findings,
+            recommendations=response.recommendations,
+        )
+        integrity_hash = compute_integrity_hash(
+            request.dataset,
+            {"bias_score": c["bias_score"], "metrics": c["metrics"], "mitigation": mitigation.model_dump()},
+            final_compliance,
+        )
+        response.compliance = final_compliance
+        response.integrity_hash = integrity_hash
+        if not request.privacy_mode:
+            storage = JSONStorageManager()
+            saved = storage.save_audit(
+                input_data={
+                    "description": request.description,
+                    "target_column": request.target_column,
+                    "sensitive_column": request.sensitive_column,
+                    "sensitive_column_2": request.sensitive_column_2,
+                    "prediction_column": request.prediction_column,
+                    "privacy_mode": request.privacy_mode,
+                },
+                metrics={"bias_score": c["bias_score"], "metrics": c["metrics"], "mitigation": mitigation.model_dump()},
+                compliance=final_compliance | {"integrity_hash": integrity_hash},
+            )
+            response.audit_id = saved["id"]
+        return response
     except Exception as merge_err:
         raise RuntimeError(f"Response assembly failed: {merge_err}\n{traceback.format_exc()}")

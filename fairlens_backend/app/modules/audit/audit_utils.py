@@ -4,6 +4,8 @@ audit_utils.py — Full fairness metrics, bias flags, risk scoring, mitigation.
 
 import base64
 import io
+import json
+import hashlib
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
@@ -67,6 +69,26 @@ def encode_model(model) -> str:
     buf = io.BytesIO()
     joblib.dump(model, buf)
     return base64.b64encode(buf.getvalue()).decode()
+
+
+def _canonical_json(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def compute_integrity_hash(dataset_base64: str, metrics: dict, compliance: dict) -> str:
+    raw_dataset = dataset_base64.split(",", 1)[1] if dataset_base64.startswith("data:") and "," in dataset_base64 else dataset_base64
+    dataset_digest = hashlib.sha256(raw_dataset.encode("utf-8")).hexdigest()
+    payload = {
+        "dataset_hash": dataset_digest,
+        "metrics": metrics,
+        "compliance": compliance,
+    }
+    digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+    return f"SHA256:{digest}"
+
+
+def verify_integrity(dataset_base64: str, metrics: dict, compliance: dict, integrity_hash: str) -> bool:
+    return compute_integrity_hash(dataset_base64, metrics, compliance) == integrity_hash
 
 
 def build_debiased_dataset(

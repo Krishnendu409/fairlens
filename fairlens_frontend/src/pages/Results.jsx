@@ -8,7 +8,7 @@ import HistoryPanel from '../components/HistoryPanel'
 import TrendChart from '../components/TrendChart'
 import PageHeader from '../components/PageHeader'
 import { buildShareUrl, decodeShareData } from '../api/share'
-import { exportToPdf } from '../api/exportPdf'
+import { exportToPdf, exportToPdfBlob } from '../api/exportPdf'
 import Icon from '../components/Icon'
 import styles from './Results.module.css'
 
@@ -19,6 +19,7 @@ export default function Results() {
   const [shareState, setShareState] = useState('idle')
   const [showHistory, setShowHistory] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState('')
 
   const sharedParam = searchParams.get('shared')
   let stateData = location.state
@@ -46,8 +47,17 @@ export default function Results() {
     try { await exportToPdf(prompt, aiResponse, result) }
     finally { setExporting(false) }
   }
+  async function handlePreviewPdf() {
+    const blob = await exportToPdfBlob(prompt, aiResponse, result)
+    const nextUrl = URL.createObjectURL(blob)
+    setPdfPreviewUrl(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return nextUrl
+    })
+  }
 
   const shareLabel = { idle: 'Share', copied: 'Copied!', error: 'Failed' }[shareState]
+  const fairnessGrade = result.bias_score < 20 ? 'A' : result.bias_score < 35 ? 'B' : result.bias_score < 50 ? 'C' : result.bias_score < 70 ? 'D' : 'F'
 
   return (
     <div className={styles.page}>
@@ -56,6 +66,7 @@ export default function Results() {
         actions={[
           { label: 'History', onClick: () => setShowHistory(true) },
           { label: shareLabel, onClick: handleShare, success: shareState === 'copied' },
+          { label: 'Preview PDF', onClick: handlePreviewPdf },
           { label: exporting ? 'Exporting…' : 'PDF', onClick: handleExportPdf, disabled: exporting },
         ]}
       />
@@ -75,6 +86,7 @@ export default function Results() {
               <BiasGauge score={result.bias_score} level={result.bias_level} confidence={result.confidence} />
             </div>
             <p className={styles.gaugeHint}>
+              Fairness Grade: <strong>{fairnessGrade}</strong><br />
               {result.bias_level === 'Low' && 'Minimal bias detected.'}
               {result.bias_level === 'Moderate' && 'Notable bias that could affect some groups.'}
               {result.bias_level === 'High' && 'Significant bias. Review the unbiased rewrite.'}
@@ -108,6 +120,13 @@ export default function Results() {
           <p className={styles.cardTitle}>Original Prompt</p>
           <p className={styles.promptText}>{prompt}</p>
         </div>
+
+        {pdfPreviewUrl && (
+          <div className={styles.card}>
+            <p className={styles.cardTitle}>PDF Preview</p>
+            <iframe title="PDF preview" src={pdfPreviewUrl} style={{ width: '100%', minHeight: '480px', border: '1px solid var(--border)', borderRadius: '8px' }} />
+          </div>
+        )}
       </main>
 
       <footer className={styles.footer}>
