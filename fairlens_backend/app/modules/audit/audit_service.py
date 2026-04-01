@@ -676,34 +676,62 @@ def _method_reweighing(df, computed):
 
 def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
     try:
+        from sklearn.linear_model import LogisticRegression
+
         sc = computed["sensitive_col"]; tc = computed["target_col"]
         pc = computed["positive_class"]; gs = computed["group_stats"]
-        hp = computed["has_predictions"]
         if not sc or not tc or not pc:
             return {"method":"threshold_optimisation","error":"insufficient columns"}
+
+        X, y, sensitive = _prepare_training_frame(df, computed)
+        if X is None or y is None or sensitive is None:
+            return {"method":"threshold_optimisation","error":"insufficient columns"}
+        if len(np.unique(y)) < 2:
+            return {"method":"threshold_optimisation","error":"target column has only one class"}
+
+        base_model = LogisticRegression(max_iter=200)
+        base_model.fit(X, y)
+        y_prob = base_model.predict_proba(X)[:, 1]
+
         rates = [g["pass_rate"] for g in gs]
-        global_target = float(np.median(rates))
-        best_rates = []; total_correct = 0.0; total_n = 0
-        for g_s in gs:
-            g = g_s["group"]
-            gdf = df[df[sc].astype(str)==g]; n = len(gdf)
-            if n == 0: continue
-            actual_pos = int((gdf[tc]==pc).sum()); actual_neg = n - actual_pos
-            best_loss = float("inf"); best_rate_t = g_s["pass_rate"]; best_acc_t = 0.0
-            for t in np.arange(0.02, 0.99, 0.02):
-                pred_pos = max(0, min(n, int(np.ceil(n*(1.0-float(t))))))
-                pred_neg = n - pred_pos
-                tp = min(pred_pos, actual_pos); tn = min(pred_neg, actual_neg)
-                adj_rate = pred_pos/n; acc_t = (tp+tn)/n
-                loss = abs(adj_rate-global_target) + lambda_acc*(1.0-acc_t)
+        global_target = float(np.median(rates)) if rates else 0.5
+        group_thresholds = {}
+        group_order = sorted(sensitive.unique(), key=str)
+
+        for grp in group_order:
+            mask = sensitive.astype(str) == str(grp)
+            if int(mask.sum()) == 0:
+                continue
+            gp = y_prob[mask]
+            gy = np.array(y[mask], dtype=int)
+            best_t = 0.5
+            best_loss = float("inf")
+            for t in np.arange(0.05, 0.951, 0.05):
+                pred = (gp >= float(t)).astype(int)
+                adj_rate = float(np.mean(pred == 1))
+                acc_t = float(np.mean(pred == gy))
+                loss = abs(adj_rate - global_target) + lambda_acc * (1.0 - acc_t)
                 if loss < best_loss:
-                    best_loss=loss; best_rate_t=round(adj_rate,4); best_acc_t=acc_t
-            best_rates.append(best_rate_t)
-            total_correct += best_acc_t*n; total_n += n
-        if not best_rates:
+                    best_loss = loss
+                    best_t = float(t)
+            group_thresholds[str(grp)] = round(best_t, 2)
+
+        if not group_thresholds:
             return {"method":"threshold_optimisation","error":"no groups processed"}
-        acc = float(round(max(0.0,min(1.0,total_correct/total_n)),4)) if total_n>0 else 0.5
-        # bias score recomputed below from dpd/dir after adjustment — _bias_score_from_rates not used here
+
+        y_hat = np.zeros(len(y_prob), dtype=int)
+        for grp, t in group_thresholds.items():
+            mask = sensitive.astype(str) == str(grp)
+            y_hat[mask] = (y_prob[mask] >= float(t)).astype(int)
+
+        best_rates = []
+        for grp in group_order:
+            mask = sensitive.astype(str) == str(grp)
+            if int(mask.sum()) == 0:
+                continue
+            best_rates.append(round(float(np.mean(y_hat[mask] == 1)), 4))
+
+        acc = float(round(np.mean(y_hat == np.array(y, dtype=int)), 4))
         dpd_after = round(max(best_rates)-min(best_rates),4) if len(best_rates)>=2 else 0.0
         dir_after = round(min(best_rates)/max(best_rates),4) if len(best_rates)>=2 and max(best_rates)>0 else 1.0
         return {"method":"threshold_optimisation","accuracy":acc,"dpd":dpd_after,"dir":dir_after,
@@ -849,15 +877,12 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
     """
     Run all 3 mitigation methods and rank them.
 
-    KEY DESIGN DECISIONS:
-    - All methods simulate what bias WOULD look like after their intervention.
-    - Reweighing: weights converge pass rates to global mean -> projected DPD~0.
-      BUT: this requires model retraining. We apply a 0.85 confidence discount
-      to bias_reduction to reflect that the improvement is projected, not guaranteed.
-    - Threshold optimisation: finds per-group threshold minimising |rate - median|.
-    - Adversarial debiasing: iterative gradient equalisation toward global mean.
+    Methods are executed against the dataset and model predictions:
+    - AIF360 reweighing + logistic regression retrain
+    - Fairlearn ExponentiatedGradient under demographic parity constraint
+    - Threshold optimisation on model probabilities (per-group thresholds)
 
-    Ranking: final_score = 0.5*bias_reduction + 0.4*accuracy + 0.1*stability
+    Ranking: final_score = 0.4*bias_reduction + 0.4*accuracy + 0.2*stability
     Methods that INCREASE bias get final_score = -1 (invalid).
     """
     before_score   = computed["bias_score"]
@@ -868,12 +893,12 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
     global_target  = float(np.median(original_rates))
 
     descriptions = {
-        "aif360_reweighing": "AIF360 Reweighing applies sample reweights before model fit to reduce group bias.",
-        "fairlearn_exponentiated_gradient": "Fairlearn ExponentiatedGradient optimizes classifier under demographic parity constraints.",
+        "aif360_reweighing": "AIF360 Reweighing applied to training instances followed by logistic-regression retraining on weighted data.",
+        "fairlearn_exponentiated_gradient": "Fairlearn ExponentiatedGradient trained under a demographic parity constraint.",
         "threshold_optimisation": (
             f"Finds the decision threshold per group minimising "
-            f"|rate−{global_target:.1%}| (global median) + 0.5×(1−accuracy). "
-            f"Post-processing: no retraining required."
+            f"|rate−{global_target:.1%}| (global median) + 0.5×(1−accuracy) "
+            f"on model-predicted probabilities."
         ),
     }
 
