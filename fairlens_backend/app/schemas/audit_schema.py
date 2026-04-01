@@ -20,7 +20,6 @@ class AuditRequest(BaseModel):
     sensitive_column: Optional[str] = None
     sensitive_column_2: Optional[str] = None
     prediction_column: Optional[str] = None
-    privacy_mode: bool = False
 
 
 class ChatRequest(BaseModel):

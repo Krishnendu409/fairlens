@@ -31,7 +31,6 @@ export default function Home() {
   const [auditLoading, setAuditLoading] = useState(false)
   const [auditError, setAuditError] = useState('')
   const [descFocused, setDescFocused] = useState(false)
-  const [privacyMode, setPrivacyMode] = useState(true)
 
   // Shared
   const [showTextHistory, setShowTextHistory] = useState(false)
@@ -81,7 +80,6 @@ export default function Home() {
         targetColumn: targetCol || null,
         sensitiveColumn: sensitiveCol || null,
         sensitiveColumn2: sensitiveCol2 || null,
-        privacyMode,
       })
       saveToAuditHistory({ id: generateId(), timestamp: Date.now(), description: description.trim(), result })
       navigate('/audit-results', { state: { result, description: description.trim() } })
@@ -244,10 +242,6 @@ export default function Home() {
                   <p className={styles.stepHint}>
                     FairLens sends your dataset statistics and description to Gemini 2.5 Flash. It computes fairness metrics, detects bias patterns, and returns a structured audit report with findings, charts, and recommendations.
                   </p>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, color: 'var(--text-muted)' }}>
-                    <input type="checkbox" checked={privacyMode} onChange={e => setPrivacyMode(e.target.checked)} />
-                    Privacy mode (no external API call, no server-side audit persistence)
-                  </label>
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                     <button className={styles.exampleBtn} type="button" onClick={() => runSample('compas')} disabled={auditLoading}>Sample: COMPAS</button>
                     <button className={styles.exampleBtn} type="button" onClick={() => runSample('adult_income')} disabled={auditLoading}>Sample: Adult Income</button>

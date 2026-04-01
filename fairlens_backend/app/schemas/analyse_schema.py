@@ -5,7 +5,6 @@ from typing import List, Optional, Dict, Any
 class AnalyseRequest(BaseModel):
     prompt: str
     ai_response: str
-    privacy_mode: bool = False
     dataset: Optional[List[Dict[str, Any]]] = None
     target_column: Optional[str] = None
     prediction_column: Optional[str] = None

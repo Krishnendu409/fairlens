@@ -29,7 +29,7 @@ export function parseCsvHeaders(file) {
 
 export async function auditDataset({
   file, description, targetColumn, predictionColumn,
-  sensitiveColumn, sensitiveColumn2, privacyMode = false
+  sensitiveColumn, sensitiveColumn2
 }) {
   const base64 = await fileToBase64(file)
   const { data } = await api.post('/audit-dataset', {
@@ -39,7 +39,6 @@ export async function auditDataset({
     prediction_column: predictionColumn || null,
     sensitive_column: sensitiveColumn || null,
     sensitive_column_2: sensitiveColumn2 || null,
-    privacy_mode: !!privacyMode,
   })
   return data
 }

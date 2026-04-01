@@ -202,7 +202,9 @@ function footer(doc) {
 }
 
 function sectionHeader(doc, num, title, subtitle, y) {
-  y = checkPage(doc, y, 20)
+  const subtitleLines = subtitle ? doc.splitTextToSize(s(subtitle), CW) : []
+  const subtitleH = subtitleLines.length ? (subtitleLines.length * 3.2 + 1) : 0
+  y = checkPage(doc, y, 16 + subtitleH)
   // Orange top bar
   doc.setFillColor(...C.primary)
   doc.rect(M, y, CW, 1.5, 'F')
@@ -212,8 +214,12 @@ function sectionHeader(doc, num, title, subtitle, y) {
   y += 5
   if (subtitle) {
     doc.setFontSize(7.5); doc.setFont('helvetica','italic'); doc.setTextColor(...C.muted)
-    doc.text(s(subtitle), M, y)
-    y += 4
+    for (const line of subtitleLines) {
+      y = checkPage(doc, y, 4)
+      doc.text(line, M, y)
+      y += 3.2
+    }
+    y += 1
   }
   doc.setDrawColor(...C.border); doc.setLineWidth(0.2)
   doc.line(M, y, M+CW, y)
@@ -243,13 +249,23 @@ function textBlock(doc, text, x, y, opts={}) {
   return y + mb
 }
 
+function wrappedTextHeight(doc, text, maxW, fs = 8.5, lh = 1.45, bold = false) {
+  doc.setFontSize(fs)
+  doc.setFont('helvetica', bold ? 'bold' : 'normal')
+  const lines = doc.splitTextToSize(s(text), maxW)
+  const lineH = fs * 0.352 * lh
+  return Math.max(lineH, lines.length * lineH)
+}
+
 function kv(doc, label, value, y, valColor) {
   doc.setFontSize(8); doc.setFont('helvetica','bold'); doc.setTextColor(...C.muted)
+  const lines = doc.splitTextToSize(s(value||'—'), CW-50)
+  const rowH = Math.max(5, lines.length * 3.8)
+  y = checkPage(doc, y, rowH + 2)
   doc.text(s(label), M, y)
   doc.setFont('helvetica','normal'); doc.setTextColor(...(valColor||C.text))
-  const lines = doc.splitTextToSize(s(value||'—'), CW-50)
   doc.text(lines, M+50, y)
-  return y + Math.max(5, lines.length * 3.8)
+  return y + rowH
 }
 
 function statusBadge(doc, text, x, y, color) {
@@ -371,18 +387,21 @@ function gauge(doc, score, risk, y) {
 }
 
 function alertBox(doc, title, body, y, color, height) {
-  y = checkPage(doc, y, height||22)
+  const titleH = 7
+  const bodyH = body ? wrappedTextHeight(doc, body, CW-8, 8, 1.45, false) + 4 : 0
+  const needed = Math.max(height||0, 6 + titleH + bodyH)
+  y = checkPage(doc, y, needed)
   doc.setFillColor(...color.map(c=>Math.min(255,c+(255-c)*0.92)))
   doc.setDrawColor(...color); doc.setLineWidth(0.5)
-  doc.roundedRect(M, y, CW, height||22, 2,2,'FD')
+  doc.roundedRect(M, y, CW, needed, 2,2,'FD')
   doc.setFontSize(8); doc.setFont('helvetica','bold'); doc.setTextColor(...color)
   doc.text(s(title), M+4, y+6)
   if (body) {
     doc.setFont('helvetica','normal'); doc.setTextColor(...C.text)
-    y = textBlock(doc, body, M+4, y+10, {maxW:CW-8, fs:8, color:C.text, mb:0})
-    return y + 6
+    const bodyEnd = textBlock(doc, body, M+4, y+10, {maxW:CW-8, fs:8, color:C.text, mb:0})
+    return Math.max(y + needed + 4, bodyEnd + 4)
   }
-  return y + (height||22) + 4
+  return y + needed + 4
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -488,7 +507,8 @@ export async function exportAuditToPdf(result, description, options = {}) {
   // Summary
   if (result.summary) {
     doc.setFillColor(...C.surface); doc.setDrawColor(...C.border); doc.setLineWidth(0.3)
-    const ph = result.summary.split('\n\n').length * 18 + 14
+    const ph = Math.max(18, 10 + wrappedTextHeight(doc, result.summary, CW-8, 9, 1.5) + 6)
+    cy = checkPage(doc, cy, ph + 2)
     doc.roundedRect(M, cy, CW, ph, 2,2,'FD')
     cy = textBlock(doc, 'Executive Assessment', M+4, cy+6, {fs:9, bold:true, color:C.primary, mb:2})
     cy = textBlock(doc, result.summary, M+4, cy, {maxW:CW-8, fs:9, lh:1.5, color:C.text, mb:4})
@@ -578,16 +598,23 @@ export async function exportAuditToPdf(result, description, options = {}) {
   y = textBlock(doc, 'All metrics below are computed automatically by FairLens Python engine (audit_service.py). Gemini 2.5 Flash provides narrative text only — it cannot modify numeric results. Computation is fully deterministic and reproducible from the integrity hash.', M, y, {color:C.muted, lh:1.5, mb:6})
 
   // Bias score breakdown box
-  doc.setFillColor(...C.surf2); doc.setDrawColor(...C.border); doc.setLineWidth(0.3)
-  doc.roundedRect(M, y, CW, 22, 2,2,'FD')
-  doc.setFontSize(9); doc.setFont('helvetica','bold'); doc.setTextColor(...C.text)
-  doc.text('BIAS SCORE COMPUTATION (AUTO-COMPUTED — Annex IV §4)', M+4, y+6)
-  doc.setFont('helvetica','normal'); doc.setFontSize(8)
   const bsFormula = hasPred
     ? `bias_score = mean([dpd_v, dir_v, tpr_v, fpr_v]) × 100 = ${result.bias_score}/100 (${result.bias_level})`
     : `bias_score = mean([dpd_v, dir_v]) × 100 = ${result.bias_score}/100 (${result.bias_level}) [label-only mode — TPR/FPR not computed]`
   const bd = result.score_breakdown||{}
   const bsDetail = `dpd_v=${((bd.dpd_violation||0)/100).toFixed(4)}  dir_v=${((bd.dir_violation||0)/100).toFixed(4)}${hasPred?`  tpr_v=${bd.tpr_violation!=null?(bd.tpr_violation/100).toFixed(4):'N/A'}  fpr_v=${bd.fpr_violation!=null?(bd.fpr_violation/100).toFixed(4):'N/A'}`:''}`
+  const bsH = Math.max(
+    22,
+    8 +
+    wrappedTextHeight(doc, bsFormula, CW-8, 8.5, 1.45, true) +
+    wrappedTextHeight(doc, bsDetail, CW-8, 7.5, 1.45, false) + 2
+  )
+  y = checkPage(doc, y, bsH + 2)
+  doc.setFillColor(...C.surf2); doc.setDrawColor(...C.border); doc.setLineWidth(0.3)
+  doc.roundedRect(M, y, CW, bsH, 2,2,'FD')
+  doc.setFontSize(9); doc.setFont('helvetica','bold'); doc.setTextColor(...C.text)
+  doc.text('BIAS SCORE COMPUTATION (AUTO-COMPUTED — Annex IV §4)', M+4, y+6)
+  doc.setFont('helvetica','normal'); doc.setFontSize(8)
   y = textBlock(doc, bsFormula, M+4, y+10, {fs:8.5, bold:true, color:risk.color, mb:1})
   y = textBlock(doc, bsDetail,  M+4, y,    {fs:7.5, color:C.muted, mb:2})
   y += 8
@@ -683,16 +710,25 @@ export async function exportAuditToPdf(result, description, options = {}) {
 
   // Statistical significance
   if (result.statistical_test) {
-    y = checkPage(doc, y, 28)
     const st = result.statistical_test
-    y = subHead(doc, 'Statistical Significance — Chi-Square Test + Cramér\'s V (Annex IV §2(g))', y)
+    const stHead = 'Statistical Significance — Chi-Square Test + Cramér\'s V (Annex IV §2(g))'
+    const stMain = st.is_significant ? 'STATISTICALLY SIGNIFICANT BIAS DETECTED (p < 0.05)' : 'NOT STATISTICALLY SIGNIFICANT (p ≥ 0.05)'
+    const stLine = `χ² = ${num(st.statistic,3)} | p = ${num(st.p_value,6)} | Cramér's V = ${num(st.cramers_v,3)} (${s(st.effect_size)} effect)`
+    const stBoxH = Math.max(
+      22,
+      8 + wrappedTextHeight(doc, stMain, CW-8, 9, 1.3, true) +
+      wrappedTextHeight(doc, stLine, CW-8, 8.5, 1.35, false) +
+      wrappedTextHeight(doc, s(st.interpretation), CW-8, 8, 1.45, false)
+    )
+    y = checkPage(doc, y, stBoxH + 16)
+    y = subHead(doc, stHead, y)
     const sigColor = st.is_significant ? C.red : C.green
     doc.setFillColor(...C.surface); doc.setDrawColor(...sigColor); doc.setLineWidth(0.5)
-    doc.roundedRect(M, y, CW, 22, 2,2,'FD')
+    doc.roundedRect(M, y, CW, stBoxH, 2,2,'FD')
     doc.setFontSize(9); doc.setFont('helvetica','bold'); doc.setTextColor(...sigColor)
-    doc.text(st.is_significant ? 'STATISTICALLY SIGNIFICANT BIAS DETECTED (p < 0.05)' : 'NOT STATISTICALLY SIGNIFICANT (p ≥ 0.05)', M+4, y+7)
+    doc.text(stMain, M+4, y+7)
     doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(...C.text)
-    doc.text(`χ² = ${num(st.statistic,3)} | p = ${num(st.p_value,6)} | Cramér's V = ${num(st.cramers_v,3)} (${s(st.effect_size)} effect)`, M+4, y+13)
+    doc.text(doc.splitTextToSize(stLine, CW-8), M+4, y+13)
     y = textBlock(doc, s(st.interpretation), M+4, y+17, {maxW:CW-8, fs:8, color:C.muted, mb:0})
     y += 10
   }
@@ -707,15 +743,20 @@ export async function exportAuditToPdf(result, description, options = {}) {
 
   if (result.mitigation?.results?.length>0) {
     const mit = result.mitigation
+    const recMethod = s(mit.best_method).split('_').map(w=>w[0].toUpperCase()+w.slice(1)).join(' ')
+    const tradeH = wrappedTextHeight(doc, s(mit.trade_off_summary), CW-8, 8, 1.45)
+    const selH = mit.selection_reason ? wrappedTextHeight(doc, `Selection logic: ${s(mit.selection_reason)}`, CW-8, 8, 1.45) : 0
+    const mitSummaryH = Math.max(18, 8 + tradeH + selH)
+    y = checkPage(doc, y, mitSummaryH + 2)
     // Summary banner
     doc.setFillColor(...C.surf2); doc.setDrawColor(...C.green); doc.setLineWidth(0.5)
-    doc.roundedRect(M, y, CW, 16, 2,2,'FD')
+    doc.roundedRect(M, y, CW, mitSummaryH, 2,2,'FD')
     doc.setFontSize(8.5); doc.setFont('helvetica','bold'); doc.setTextColor(...C.text)
-    doc.text(`Recommended Strategy: ${s(mit.best_method).split('_').map(w=>w[0].toUpperCase()+w.slice(1)).join(' ')}`, M+4, y+6)
+    doc.text(`Recommended Strategy: ${recMethod}`, M+4, y+6)
     doc.setFont('helvetica','normal'); doc.setTextColor(...C.muted)
     y = textBlock(doc, s(mit.trade_off_summary), M+4, y+10, {maxW:CW-8, fs:8, color:C.text, mb:0})
     if (mit.selection_reason) {
-      y = textBlock(doc, `Selection logic: ${s(mit.selection_reason)}`, M+4, y+14, {maxW:CW-8, fs:8, color:C.text, mb:0})
+      y = textBlock(doc, `Selection logic: ${s(mit.selection_reason)}`, M+4, y+2, {maxW:CW-8, fs:8, color:C.text, mb:0})
       y += 2
     }
     y += 8
@@ -732,6 +773,48 @@ export async function exportAuditToPdf(result, description, options = {}) {
       {text:r.final_score>=0?r.final_score.toFixed(3):'Invalid',color:r.final_score>=0?C.text:C.red},
     ]))
     y = table(doc, mH, mRows, y, mW)
+
+    y = subHead(doc, 'Mitigation Suite Research Matrix (Context-Specific Fairness Priorities)', y)
+    y = textBlock(
+      doc,
+      'Core formulas remain constant across domains (DPD, DIR, TPR/FPR gaps where available). What changes by domain is risk severity, threshold sensitivity, and mitigation priority. Use this matrix to tune governance decisions while keeping metric computation consistent.',
+      M,
+      y,
+      { color: C.muted, lh: 1.5, mb: 6 }
+    )
+    const suiteRows = [
+      [
+        { text: 'Employment / HR', bold: true },
+        { text: 'Selection, promotion, salary, termination' },
+        { text: 'DPD, DIR, TPR/FPR gaps, per-group precision/recall' },
+        { text: 'Start with reweighing for imbalance; validate threshold optimization + ROC for final hiring cutoffs' },
+      ],
+      [
+        { text: 'Education / Admissions', bold: true },
+        { text: 'Pass/fail disparity, grade-based exclusion' },
+        { text: 'DPD, DIR, performance_gap, Theil' },
+        { text: 'Use disparate impact repair for proxy-heavy features; audit reject option near decision boundary' },
+      ],
+      [
+        { text: 'Credit / Lending', bold: true },
+        { text: 'Approval denial concentration, adverse action bias' },
+        { text: 'DIR, FPR gap, calibration and rejection parity' },
+        { text: 'Prioritize equalized error control with threshold optimization and strict drift monitoring' },
+      ],
+      [
+        { text: 'Healthcare triage', bold: true },
+        { text: 'False negatives causing missed care' },
+        { text: 'TPR gap, FPR gap, subgroup recall' },
+        { text: 'Optimize for equal opportunity (TPR parity) before acceptance-rate parity; monitor harm outcomes' },
+      ],
+      [
+        { text: 'Housing / Public services', bold: true },
+        { text: 'Access denial clustering by group' },
+        { text: 'DPD, DIR, Theil, proxy-correlation checks' },
+        { text: 'Combine reweighing + proxy analysis and require periodic post-market re-audit thresholds' },
+      ],
+    ]
+    y = table(doc, ['Context','Primary Bias Pattern','Priority Metrics','Mitigation Focus'], suiteRows, y, [30,42,42,56])
 
       // Art. 9 Implementation roadmap requirement
       y = alertBox(doc, 'ART. 9 IMPLEMENTATION ROADMAP — OPERATOR ACTION REQUIRED',
@@ -1085,17 +1168,30 @@ export async function exportAuditToPdf(result, description, options = {}) {
     y, C.amber, 26)
 
   // Integrity seal
+  const sealLine1 = `Compliance Record: ${recordId||'N/A — offline export'}`
+  const sealLine2 = `Export Hash: ${exportHash}`
+  const sealLine3 = 'Computation: SHA256(record_id | updated_at | sorted compliance metadata)'
+  const sealLine4 = `Verification: ${hashValid?'VERIFIED AGAINST SERVER RECORD':'LOCAL HASH — not verified against server'}`
+  const sealH = Math.max(
+    36,
+    10 +
+    wrappedTextHeight(doc, sealLine1, CW-10, 8, 1.4) +
+    wrappedTextHeight(doc, sealLine2, CW-10, 8, 1.4) +
+    wrappedTextHeight(doc, sealLine3, CW-10, 8, 1.4) +
+    wrappedTextHeight(doc, sealLine4, CW-10, 8, 1.4) + 6
+  )
+  y = checkPage(doc, y, sealH + 2)
   doc.setFillColor(...C.surface); doc.setDrawColor(...C.border); doc.setLineWidth(0.4)
-  doc.roundedRect(M, y, CW, 36, 2,2,'FD')
+  doc.roundedRect(M, y, CW, sealH, 2,2,'FD')
   doc.setFontSize(9.5); doc.setFont('helvetica','bold'); doc.setTextColor(...C.primary)
   doc.text('AUTOMATED INTEGRITY SEAL (Document Verification Only)', M+5, y+8)
-  doc.setFontSize(8); doc.setFont('helvetica','normal'); doc.setTextColor(...C.text)
-  doc.text(`Compliance Record:  ${recordId||'N/A — offline export'}`, M+5, y+15)
-  doc.text(`Export Hash:        ${exportHash}`, M+5, y+21)
-  doc.text(`Computation:        SHA256(record_id | updated_at | sorted compliance metadata)`, M+5, y+27)
+  let sy = y + 14
+  sy = textBlock(doc, sealLine1, M+5, sy, { maxW: CW-10, fs: 8, lh: 1.4, mb: 1 })
+  sy = textBlock(doc, sealLine2, M+5, sy, { maxW: CW-10, fs: 8, lh: 1.4, mb: 1 })
+  sy = textBlock(doc, sealLine3, M+5, sy, { maxW: CW-10, fs: 8, lh: 1.4, mb: 1 })
   doc.setTextColor(...(hashValid?C.green:C.amber))
-  doc.text(`Verification:       ${hashValid?'VERIFIED AGAINST SERVER RECORD':'LOCAL HASH — not verified against server'}`, M+5, y+33)
-  y += 42
+  sy = textBlock(doc, sealLine4, M+5, sy, { maxW: CW-10, fs: 8, lh: 1.4, mb: 0 })
+  y = Math.max(y + sealH + 6, sy + 6)
 
   // Annex V items covered
   y = subHead(doc, 'Annex V Coverage — EU Declaration of Conformity Requirements', y)
