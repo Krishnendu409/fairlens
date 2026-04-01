@@ -103,6 +103,9 @@ class MitigationMethodResult(BaseModel):
     method_type: Optional[str] = None
     scenario_reason: Optional[str] = None
     selected_by_scenario: bool = False
+    selected_by_policy: bool = False
+    selected_by_metric_override: bool = False
+    selection_badge: Optional[str] = None
     bias_score: float
     accuracy: Optional[float] = None
     precision: Optional[float] = None
@@ -134,6 +137,10 @@ class MitigationSummary(BaseModel):
     selected_method: Optional[str] = None
     selection_reason: Optional[str] = None
     selection_context: Dict[str, Any] = Field(default_factory=dict)
+    policy_selected_method: Optional[str] = None
+    metric_override_method: Optional[str] = None
+    final_selection_source: Optional[str] = None
+    decision_trace: List[Dict[str, Any]] = Field(default_factory=list)
     bias_before: float
     bias_after: float
     accuracy_after: Optional[float] = None

@@ -660,6 +660,13 @@ export default function AuditResultsPage() {
       isBest: r.method === mitigation.best_method,
     }))
   ] : []
+  const policyProfile = mitigation?.selection_context?.policy_profile || {}
+  const metricTriggers = mitigation?.selection_context?.metric_triggers || {}
+  const decisionTrace = Array.isArray(mitigation?.decision_trace) ? mitigation.decision_trace : []
+  const scenarioEvidence = mitigation?.selection_context?.scenario_evidence || []
+  const finalSelectionSource = mitigation?.final_selection_source || mitigation?.selection_context?.final_selection_source || 'scenario_policy'
+  const sourceBadgeLabel = finalSelectionSource === 'metric_override' ? 'Metric-overridden' : 'Policy-selected'
+  const sourceBadgeClass = finalSelectionSource === 'metric_override' ? styles.badgeAmber : styles.badgeBlue
 
   const tt = {
     contentStyle: { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8 },
@@ -687,20 +694,22 @@ export default function AuditResultsPage() {
   }
 
   async function handlePreviewPdf() {
+    const previewTab = window.open('', '_blank')
     setPreviewingPdf(true)
     setPdfPreviewError('')
     try {
+      if (!previewTab) {
+        throw new Error('Popup blocked')
+      }
+      previewTab.document.write('<!doctype html><title>Generating PDF preview…</title><p style="font-family:sans-serif;padding:16px">Generating PDF preview…</p>')
       const payload = { ...result, compliance_metadata: { ...(result?.compliance_metadata || {}), ...complianceDraft } }
       const blob = await exportAuditToPdfBlob(payload, datasetDescription)
       const nextUrl = URL.createObjectURL(blob)
-      const previewTab = window.open(nextUrl, '_blank', 'noopener,noreferrer')
-      if (!previewTab) {
-        URL.revokeObjectURL(nextUrl)
-        throw new Error('Popup blocked')
-      }
+      previewTab.location.href = nextUrl
       setTimeout(() => URL.revokeObjectURL(nextUrl), 60_000)
     } catch (error) {
       console.error('PDF preview failed:', error)
+      if (previewTab && !previewTab.closed) previewTab.close()
       if (String(error?.message || '').toLowerCase().includes('popup blocked')) {
         setPdfPreviewError('Preview failed because popup was blocked. Allow popups and try again.')
       } else if (String(error?.message || '').toLowerCase().includes('invalid audit result payload')) {
@@ -1405,6 +1414,62 @@ export default function AuditResultsPage() {
                   ))}
                 </ul>
               </div>
+            )}
+
+            {mitigation && (
+              <>
+                <div className={styles.card}>
+                  <h3 className={styles.cardTitle}>Scenario Transparency</h3>
+                  <div className={styles.selectorBadgeRow}>
+                    <span className={`${styles.badge} ${sourceBadgeClass}`}>{sourceBadgeLabel}</span>
+                    {mitigation.policy_selected_method && (
+                      <span className={`${styles.badge} ${styles.badgeGreen}`}>
+                        Policy: {mitigation.policy_selected_method.split('_').join(' ')}
+                      </span>
+                    )}
+                    {mitigation.metric_override_method && (
+                      <span className={`${styles.badge} ${styles.badgeAmber}`}>
+                        Override: {mitigation.metric_override_method.split('_').join(' ')}
+                      </span>
+                    )}
+                  </div>
+                  <ul className={styles.transpMetaList}>
+                    <li className={styles.transpMetaItem}><strong>Detected domain:</strong> {mitigation.selection_context?.scenario || 'general'}</li>
+                    <li className={styles.transpMetaItem}><strong>Scenario confidence:</strong> {mitigation.selection_context?.scenario_confidence ?? 0}</li>
+                    <li className={styles.transpMetaItem}><strong>Evidence keywords:</strong> {scenarioEvidence.length ? scenarioEvidence.join(', ') : 'No strong domain keywords found'}</li>
+                    <li className={styles.transpMetaItem}><strong>Policy reason:</strong> {mitigation.selection_context?.decision_trace?.[0]?.reason || mitigation.selection_reason || 'Not available'}</li>
+                  </ul>
+                </div>
+
+                <div className={styles.card}>
+                  <h3 className={styles.cardTitle}>Metric Transparency</h3>
+                  <ul className={styles.transpMetaList}>
+                    <li className={styles.transpMetaItem}><strong>Fairness priorities:</strong> {(policyProfile.fairness_priority || []).join(', ') || 'Not specified'}</li>
+                    <li className={styles.transpMetaItem}><strong>Thresholds:</strong> DPD ≤ {policyProfile.metric_thresholds?.dpd_max ?? 0.1}, DIR ≥ {policyProfile.metric_thresholds?.dir_min ?? 0.8}, TPR/FPR gap ≤ {policyProfile.metric_thresholds?.tpr_gap_max ?? 0.1}</li>
+                    <li className={styles.transpMetaItem}><strong>Measured gates:</strong> DPD severe={String(!!metricTriggers.dpd_severe)}, DIR critical={String(!!metricTriggers.dir_critical)}, TPR severe={String(!!metricTriggers.tpr_gap_severe)}, FPR severe={String(!!metricTriggers.fpr_gap_severe)}</li>
+                    <li className={styles.transpMetaItem}><strong>Unmeasured handling:</strong> {has_predictions ? 'TPR/FPR measured from predictions.' : 'TPR/FPR unavailable in label-only mode.'}</li>
+                  </ul>
+                </div>
+
+                <div className={styles.card}>
+                  <h3 className={styles.cardTitle}>Mitigation Transparency</h3>
+                  <ul className={styles.transpMetaList}>
+                    <li className={styles.transpMetaItem}><strong>Policy method:</strong> {mitigation.policy_selected_method || 'Not available'}</li>
+                    <li className={styles.transpMetaItem}><strong>Final method:</strong> {mitigation.selected_method || mitigation.best_method}</li>
+                    <li className={styles.transpMetaItem}><strong>Selection source:</strong> {finalSelectionSource}</li>
+                    <li className={styles.transpMetaItem}><strong>Trade-off:</strong> {mitigation.trade_off_summary || 'Not available'}</li>
+                  </ul>
+                </div>
+
+                <div className={styles.card}>
+                  <h3 className={styles.cardTitle}>Governance Transparency</h3>
+                  <ul className={styles.transpMetaList}>
+                    <li className={styles.transpMetaItem}><strong>Automated:</strong> metric calculation, scenario detection, policy lookup, method scoring/ranking.</li>
+                    <li className={styles.transpMetaItem}><strong>Operator action required:</strong> legal basis, notice text, deployment controls, ongoing monitoring cadence.</li>
+                    <li className={styles.transpMetaItem}><strong>Decision trace layers:</strong> {decisionTrace.map(d => d.layer).join(' → ') || 'Not available'}</li>
+                  </ul>
+                </div>
+              </>
             )}
 
             <div className={styles.card}>
