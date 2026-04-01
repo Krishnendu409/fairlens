@@ -8,7 +8,6 @@ def test_validation_missing_columns():
     req = AnalyseRequest(
         prompt="p",
         ai_response="r",
-        privacy_mode=True,
         dataset=[{"a": 1}],
         target_column="target",
         prediction_column="pred",
@@ -22,7 +21,6 @@ def test_validation_empty_groups():
     req = AnalyseRequest(
         prompt="p",
         ai_response="r",
-        privacy_mode=True,
         dataset=[
             {"target": 1, "pred": 1, "group": "A"},
             {"target": 0, "pred": 0, "group": "A"},

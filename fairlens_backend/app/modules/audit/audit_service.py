@@ -1486,7 +1486,7 @@ def _fix_json(s: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def merge_into_response(stats, ai, root_causes, bias_origin_dict,
-                        mitigation, stat_test, reliability_dict, privacy_mode: bool = False) -> AuditResponse:
+                        mitigation, stat_test, reliability_dict) -> AuditResponse:
     c       = stats["computed"]
     # Guard: Gemini may return None or a list for metric_interpretations
     raw_interps = ai.get("metric_interpretations", {})
@@ -1545,7 +1545,6 @@ def merge_into_response(stats, ai, root_causes, bias_origin_dict,
     return AuditResponse(
         bias_score=c["bias_score"], bias_level=c["bias_level"],
         risk_label=c["risk_label"], bias_detected=c["bias_detected"],
-        privacy_mode=privacy_mode,
         total_rows=c["total_rows"], columns=c["columns"],
         sensitive_column=c.get("sensitive_col"),
         target_column=c.get("target_col"),
@@ -1683,22 +1682,10 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
     bias_origin_dict = detect_bias_origin(stats)
     mitigation       = run_mitigation(df, c)
     prompt           = build_prompt(stats, root_causes, reliability_dict)
-    if request.privacy_mode:
-        ai = {
-            "summary": "Privacy mode enabled. Narrative generation skipped; metrics computed locally.",
-            "key_findings": [
-                "No external API call was made in privacy mode.",
-                f"Bias score computed locally: {c['bias_score']}.",
-            ],
-            "recommendations": ["Disable privacy mode if you want generated narrative text."],
-            "metric_interpretations": {},
-            "plain_language": {"overall": "Privacy mode run with local computation only."},
-        }
-    else:
-        try:
-            ai = await call_gemini(prompt)
-        except Exception as gemini_err:
-            raise RuntimeError(f"Gemini call failed: {gemini_err}")
+    try:
+        ai = await call_gemini(prompt)
+    except Exception as gemini_err:
+        raise RuntimeError(f"Gemini call failed: {gemini_err}")
 
     # Ensure ai is a dict with expected structure
     if not isinstance(ai, dict):
@@ -1707,7 +1694,7 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
     try:
         response = merge_into_response(
             stats, ai, root_causes, bias_origin_dict,
-            mitigation, stat_test, reliability_dict, request.privacy_mode,
+            mitigation, stat_test, reliability_dict,
         )
         final_compliance = evaluate_eu_ai_act(
             bias_score=c["bias_score"],
@@ -1724,21 +1711,19 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
         )
         response.compliance = final_compliance
         response.integrity_hash = integrity_hash
-        if not request.privacy_mode:
-            storage = JSONStorageManager()
-            saved = storage.save_audit(
-                input_data={
-                    "description": request.description,
-                    "target_column": request.target_column,
-                    "sensitive_column": request.sensitive_column,
-                    "sensitive_column_2": request.sensitive_column_2,
-                    "prediction_column": request.prediction_column,
-                    "privacy_mode": request.privacy_mode,
-                },
-                metrics={"bias_score": c["bias_score"], "metrics": c["metrics"], "mitigation": mitigation.model_dump()},
-                compliance=final_compliance | {"integrity_hash": integrity_hash},
-            )
-            response.audit_id = saved["id"]
+        storage = JSONStorageManager()
+        saved = storage.save_audit(
+            input_data={
+                "description": request.description,
+                "target_column": request.target_column,
+                "sensitive_column": request.sensitive_column,
+                "sensitive_column_2": request.sensitive_column_2,
+                "prediction_column": request.prediction_column,
+            },
+            metrics={"bias_score": c["bias_score"], "metrics": c["metrics"], "mitigation": mitigation.model_dump()},
+            compliance=final_compliance | {"integrity_hash": integrity_hash},
+        )
+        response.audit_id = saved["id"]
         return response
     except Exception as merge_err:
         raise RuntimeError(f"Response assembly failed: {merge_err}\n{traceback.format_exc()}")

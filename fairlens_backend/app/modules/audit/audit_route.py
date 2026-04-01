@@ -234,7 +234,6 @@ Female,1,1,41,45
         target_column="two_year_recid" if key == "compas" else "income",
         sensitive_column="race" if key == "compas" else "sex",
         prediction_column="prediction",
-        privacy_mode=True,
     )
     try:
         return await run_audit(payload)

@@ -570,6 +570,7 @@ export default function AuditResultsPage() {
   const [pdfPreviewError, setPdfPreviewError] = useState('')
   const [showBadgeModal, setShowBadgeModal] = useState(false)
   const [searchParams] = useSearchParams()
+  const [showComplianceMetadataForm, setShowComplianceMetadataForm] = useState(false)
   const [complianceDraft, setComplianceDraft] = useState({})
 
   let result, datasetDescription
@@ -617,7 +618,6 @@ export default function AuditResultsPage() {
     plain_language = {},
     sample_rows = [],
     group_rates_map = {},
-    privacy_mode = false,
   } = result
 
   const scoreColor = bias_score < 20 ? '#4ade80' : bias_score < 45 ? '#fbbf24' : bias_score < 70 ? '#f97316' : '#f87171'
@@ -666,10 +666,15 @@ export default function AuditResultsPage() {
   }
 
   async function handleExport() {
+    setShowComplianceMetadataForm(true)
+  }
+
+  async function handleConfirmExport() {
     setExporting(true)
     try {
       const payload = { ...result, compliance_metadata: { ...(result?.compliance_metadata || {}), ...complianceDraft } }
       await exportAuditToPdf(payload, datasetDescription)
+      setShowComplianceMetadataForm(false)
     } finally { setExporting(false) }
   }
 
@@ -749,39 +754,43 @@ export default function AuditResultsPage() {
             <h3 className={styles.sectionTitle} style={{ color: 'var(--red)' }}>Preview failed. Check missing required fields.</h3>
           </div>
         )}
-        {activeTab === 'summary' && (
+        {showComplianceMetadataForm && (
           <div className={styles.card}>
-            {!privacy_mode && (
-              <>
-                <h3 className={styles.sectionTitle}>Compliance Metadata (for report only)</h3>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
-                  {[
-                    ['dataset_name', 'Dataset name'],
-                    ['dataset_version', 'Dataset version'],
-                    ['data_source', 'Data source'],
-                    ['lawful_basis', 'Lawful basis'],
-                    ['purpose_of_processing', 'Purpose of processing'],
-                    ['dpia_status', 'DPIA status'],
-                    ['oversight_contact', 'Human oversight contact'],
-                    ['security_assessment_status', 'Security assessment'],
-                    ['monitoring_frequency', 'Monitoring frequency'],
-                    ['intended_use', 'Intended use'],
-                    ['system_limitations', 'System limitations'],
-                    ['log_retention_policy', 'Log retention policy'],
-                  ].map(([key, label]) => (
-                    <label key={key} style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
-                      <span>{label}</span>
-                      <input
-                        value={complianceDraft?.[key] || ''}
-                        onChange={(e) => setComplianceDraft((prev) => ({ ...prev, [key]: e.target.value }))}
-                        placeholder="NOT PROVIDED"
-                        style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)' }}
-                      />
-                    </label>
-                  ))}
-                </div>
-              </>
-            )}
+            <h3 className={styles.sectionTitle}>Compliance Metadata (for report only)</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+              {[
+                ['dataset_name', 'Dataset name'],
+                ['dataset_version', 'Dataset version'],
+                ['data_source', 'Data source'],
+                ['lawful_basis', 'Lawful basis'],
+                ['purpose_of_processing', 'Purpose of processing'],
+                ['dpia_status', 'DPIA status'],
+                ['oversight_contact', 'Human oversight contact'],
+                ['security_assessment_status', 'Security assessment'],
+                ['monitoring_frequency', 'Monitoring frequency'],
+                ['intended_use', 'Intended use'],
+                ['system_limitations', 'System limitations'],
+                ['log_retention_policy', 'Log retention policy'],
+              ].map(([key, label]) => (
+                <label key={key} style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
+                  <span>{label}</span>
+                  <input
+                    value={complianceDraft?.[key] || ''}
+                    onChange={(e) => setComplianceDraft((prev) => ({ ...prev, [key]: e.target.value }))}
+                    placeholder="NOT PROVIDED"
+                    style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)' }}
+                  />
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, justifyContent: 'flex-end' }}>
+              <button className={styles.actionBtn} onClick={() => setShowComplianceMetadataForm(false)} disabled={exporting}>
+                Cancel
+              </button>
+              <button className={styles.actionBtn} onClick={handleConfirmExport} disabled={exporting}>
+                <Icon name="pdf" size={13}/> {exporting ? 'Generating...' : 'Generate EU Compliance Report'}
+              </button>
+            </div>
           </div>
         )}
 

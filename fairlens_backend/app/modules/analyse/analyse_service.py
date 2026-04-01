@@ -127,22 +127,6 @@ async def run_analysis(request: AnalyseRequest) -> AnalyseResponse:
     gemini_prompt = build_gemini_prompt(request.prompt, request.ai_response)
     local_categories = _build_local_metrics_categories(request)
 
-    if request.privacy_mode:
-        if local_categories:
-            scores = [c.score for c in local_categories]
-            bias_score = float(np.mean(scores))
-            bias_level = determine_bias_level(bias_score)
-            return AnalyseResponse(
-                bias_score=bias_score,
-                bias_level=bias_level,
-                confidence=85.0,
-                categories=local_categories,
-                explanation="Privacy mode enabled. Results computed locally without external API calls.",
-                unbiased_response=request.ai_response,
-                flagged_phrases=[],
-            )
-        raise RuntimeError("Privacy mode requires dataset-based local analysis input.")
-
     try:
         response_data = await _call_gemini_with_retry(gemini_prompt)
     except httpx.TransportError as exc:

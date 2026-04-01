@@ -20,7 +20,6 @@ class AuditRequest(BaseModel):
     sensitive_column: Optional[str] = None
     sensitive_column_2: Optional[str] = None
     prediction_column: Optional[str] = None
-    privacy_mode: bool = False
 
 
 class ChatRequest(BaseModel):
@@ -148,7 +147,6 @@ class AuditResponse(BaseModel):
     bias_level: str
     risk_label: str
     bias_detected: bool
-    privacy_mode: bool = False
 
     total_rows: int
     columns: List[str]
