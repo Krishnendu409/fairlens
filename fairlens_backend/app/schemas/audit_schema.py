@@ -172,14 +172,37 @@ class ChatResponse(BaseModel):
 
 class ComplianceMetadata(BaseModel):
     lawful_basis: Optional[str] = None
+    purpose_of_processing: Optional[str] = None
+    data_categories: Optional[str] = None
+    retention_period: Optional[str] = None
     dpia_status: Optional[str] = None
+    dsar_process: Optional[str] = None
     dpia_link: Optional[str] = None
     dpo_contact: Optional[str] = None
     oversight_contact: Optional[str] = None
     nca_jurisdiction: Optional[str] = None
     monitoring_cadence: Optional[str] = None
+    monitoring_frequency: Optional[str] = None
     escalation_plan: Optional[str] = None
+    security_assessment_status: Optional[str] = None
     annex_confirmation: Optional[str] = None
+    dataset_name: Optional[str] = None
+    dataset_version: Optional[str] = None
+    data_source: Optional[str] = None
+    collection_method: Optional[str] = None
+    labeling_method: Optional[str] = None
+    preprocessing_steps: Optional[str] = None
+    known_biases: Optional[str] = None
+    dataset_origin: Optional[str] = None
+    representativeness_explanation: Optional[str] = None
+    bias_sources: Optional[str] = None
+    intended_use: Optional[str] = None
+    intended_users: Optional[str] = None
+    system_limitations: Optional[str] = None
+    known_failure_modes: Optional[str] = None
+    log_retention_policy: Optional[str] = None
+    log_storage_location: Optional[str] = None
+    alert_channel: Optional[str] = None
     countersignatures: List[Dict[str, Any]] = Field(default_factory=list)
     robustness_validation: Dict[str, Any] = Field(default_factory=dict)
 
