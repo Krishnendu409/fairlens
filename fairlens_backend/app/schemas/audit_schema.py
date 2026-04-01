@@ -101,11 +101,27 @@ class StatisticalTest(BaseModel):
 
 class MitigationMethodResult(BaseModel):
     method: str
+    method_type: Optional[str] = None
+    scenario_reason: Optional[str] = None
+    selected_by_scenario: bool = False
     bias_score: float
     accuracy: Optional[float] = None
+    precision: Optional[float] = None
+    recall: Optional[float] = None
     tpr_gap: Optional[float] = None
     fpr_gap: Optional[float] = None
     dpd: float
+    dir: Optional[float] = None
+    before_dpd: Optional[float] = None
+    after_dpd: Optional[float] = None
+    before_dir: Optional[float] = None
+    after_dir: Optional[float] = None
+    before_accuracy: Optional[float] = None
+    after_accuracy: Optional[float] = None
+    before_precision: Optional[float] = None
+    after_precision: Optional[float] = None
+    before_recall: Optional[float] = None
+    after_recall: Optional[float] = None
     improvement: float
     final_score: float
     description: str = ""
@@ -116,6 +132,9 @@ class MitigationSummary(BaseModel):
     results: List[MitigationMethodResult]
     best_method: str
     best_reason: str
+    selected_method: Optional[str] = None
+    selection_reason: Optional[str] = None
+    selection_context: Dict[str, Any] = Field(default_factory=dict)
     bias_before: float
     bias_after: float
     accuracy_after: Optional[float] = None

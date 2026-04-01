@@ -1145,9 +1145,9 @@ export default function AuditResultsPage() {
           <div className={styles.tabContent}>
             <h2 className={styles.tabTitle}>Fix Bias</h2>
             <p className={styles.tabSubtitle}>
-              Three model-executed mitigation strategies evaluated automatically.
+              Four scenario-aware mitigation strategies evaluated automatically.
               Ranked by: <strong>0.4 × DPD_reduction + 0.4 × est_accuracy + 0.2 × rate_stability</strong> (confidence-discounted).
-              Results are measured from executed interventions on this dataset.
+              Results are measured from executed or simulated interventions on this dataset.
             </p>
 
             {!mitigation ? (
@@ -1156,7 +1156,7 @@ export default function AuditResultsPage() {
               <>
                 <div className={styles.projectionNotice}>
                   <Icon name="insights" size={14}/>
-                  <span>Mitigation outcomes shown below come from executed method runs (AIF360/Fairlearn/threshold optimisation) on the current audit dataset.</span>
+                  <span>Mitigation outcomes shown below come from scenario-aware method runs (reweighing, disparate impact remover, threshold optimization, reject option classification) on the current audit dataset.</span>
                 </div>
 
                 {/* Banner */}
@@ -1175,6 +1175,9 @@ export default function AuditResultsPage() {
                   <div className={styles.simBannerImprovement}>
                     <span className={styles.simBannerImpLabel}>Best Method: {mitigation.best_method.split('_').map(w=>w[0].toUpperCase()+w.slice(1)).join(' ')}</span>
                     <span className={styles.simBannerImpVal}>{mitigation.trade_off_summary}</span>
+                    {mitigation.selection_reason && (
+                      <span className={styles.simBannerImpVal}>{mitigation.selection_reason}</span>
+                    )}
                   </div>
                 </div>
 
@@ -1215,9 +1218,14 @@ export default function AuditResultsPage() {
                         <div className={styles.bestBadge}>Recommended</div>
                       )}
                       <h4 className={styles.mitigationMethod}>
-                        {r.method === 'rate_equalisation' ? 'Rate Equalisation' : r.method.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}
+                        {r.method === 'threshold_optimisation'
+                          ? 'Threshold Optimization'
+                          : r.method.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}
                       </h4>
                       <p className={styles.mitigationDesc}>{r.description}</p>
+                      {r.scenario_reason && (
+                        <p className={styles.mitigationDesc}><strong>Scenario rule:</strong> {r.scenario_reason}</p>
+                      )}
                       <div className={styles.mitigationStats}>
                         <div className={styles.mitigationStat}>
                           <span className={styles.mitigationStatLabel}>Bias After Mitigation</span>

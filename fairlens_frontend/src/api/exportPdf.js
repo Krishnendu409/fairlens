@@ -700,10 +700,10 @@ export async function exportAuditToPdf(result, description, options = {}) {
   // ═══════════════════════════════════════════════════════════════════════════
   // SECTION 3 — MITIGATION STRATEGIES (Art. 9 / Annex IV §5)
   // ═══════════════════════════════════════════════════════════════════════════
-  y = sectionHeader(doc, 3, 'Bias Mitigation Strategies (Executed)',
+  y = sectionHeader(doc, 3, 'Bias Mitigation & Optimization',
     'Regulation (EU) 2024/1689 — Article 9 (Risk Management System), Annex IV §5', y)
 
-  y = textBlock(doc, 'Article 9 requires a continuous risk management system throughout the AI lifecycle. Three mitigation strategies were executed on this dataset using model-based methods. The operator must still document ownership, rollout controls, and monitoring milestones before deployment.', M, y, {color:C.muted, lh:1.5, mb:8})
+  y = textBlock(doc, 'Article 9 requires a continuous risk management system throughout the AI lifecycle. FairLens evaluates four mitigation strategies (reweighing, disparate impact remover, threshold optimization, reject option classification) and applies scenario-aware selection rules. Results below show bias reduction and performance trade-offs; no method guarantees perfect fairness.', M, y, {color:C.muted, lh:1.5, mb:8})
 
   if (result.mitigation?.results?.length>0) {
     const mit = result.mitigation
@@ -714,6 +714,10 @@ export async function exportAuditToPdf(result, description, options = {}) {
     doc.text(`Recommended Strategy: ${s(mit.best_method).split('_').map(w=>w[0].toUpperCase()+w.slice(1)).join(' ')}`, M+4, y+6)
     doc.setFont('helvetica','normal'); doc.setTextColor(...C.muted)
     y = textBlock(doc, s(mit.trade_off_summary), M+4, y+10, {maxW:CW-8, fs:8, color:C.text, mb:0})
+    if (mit.selection_reason) {
+      y = textBlock(doc, `Selection logic: ${s(mit.selection_reason)}`, M+4, y+14, {maxW:CW-8, fs:8, color:C.text, mb:0})
+      y += 2
+    }
     y += 8
 
     const mH = ['Method','Current Bias','Bias After','Bias Reduction','DPD After','Est. Accuracy','Rank Score']
