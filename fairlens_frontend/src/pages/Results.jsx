@@ -65,6 +65,7 @@ export default function Results() {
           {result.bias_level === 'Low' && '✓ Low bias detected. This response appears mostly fair.'}
           {result.bias_level === 'Moderate' && 'Moderate bias detected. Review the analysis below.'}
           {result.bias_level === 'High' && 'High bias detected. See the corrected version below.'}
+          {result.bias_level === 'Critical' && '⚠ Critical bias detected. Significant fairness intervention required before deployment.'}
         </div>
 
         <div className={styles.topRow}>
@@ -77,6 +78,7 @@ export default function Results() {
               {result.bias_level === 'Low' && 'Minimal bias detected.'}
               {result.bias_level === 'Moderate' && 'Notable bias that could affect some groups.'}
               {result.bias_level === 'High' && 'Significant bias. Review the unbiased rewrite.'}
+              {result.bias_level === 'Critical' && 'Critical bias. Deployment blocked pending remediation.'}
             </p>
           </div>
           <div className={`${styles.card} ${styles.chartCard}`}>
