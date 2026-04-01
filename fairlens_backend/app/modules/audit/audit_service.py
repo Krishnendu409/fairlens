@@ -689,6 +689,8 @@ def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
         if len(np.unique(y)) < 2:
             return {"method":"threshold_optimisation","error":"target column has only one class"}
 
+        # Keep solver budget aligned with other mitigation methods while avoiding
+        # excessive runtime in request/response audits.
         base_model = LogisticRegression(max_iter=200)
         base_model.fit(X, y)
         y_prob = base_model.predict_proba(X)[:, 1]
@@ -706,7 +708,7 @@ def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
             gy = np.array(y[mask], dtype=int)
             best_t = 0.5
             best_loss = float("inf")
-            for t in np.arange(0.05, 0.951, 0.05):
+            for t in np.arange(0.02, 0.981, 0.02):
                 pred = (gp >= float(t)).astype(int)
                 adj_rate = float(np.mean(pred == 1))
                 acc_t = float(np.mean(pred == gy))

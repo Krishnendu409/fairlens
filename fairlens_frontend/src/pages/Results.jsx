@@ -20,6 +20,7 @@ export default function Results() {
   const [showHistory, setShowHistory] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState('')
+  const [previewing, setPreviewing] = useState(false)
 
   const sharedParam = searchParams.get('shared')
   let stateData = location.state
@@ -30,6 +31,12 @@ export default function Results() {
 
   const { result, prompt, aiResponse } = stateData || {}
   useEffect(() => { if (!result) navigate('/', { replace: true }) }, [result, navigate])
+  useEffect(() => () => {
+    setPdfPreviewUrl(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return ''
+    })
+  }, [])
   if (!result) return null
 
   async function handleShare() {
@@ -48,12 +55,17 @@ export default function Results() {
     finally { setExporting(false) }
   }
   async function handlePreviewPdf() {
-    const blob = await exportToPdfBlob(prompt, aiResponse, result)
-    const nextUrl = URL.createObjectURL(blob)
-    setPdfPreviewUrl(prev => {
-      if (prev) URL.revokeObjectURL(prev)
-      return nextUrl
-    })
+    setPreviewing(true)
+    try {
+      const blob = await exportToPdfBlob(prompt, aiResponse, result)
+      const nextUrl = URL.createObjectURL(blob)
+      setPdfPreviewUrl(prev => {
+        if (prev) URL.revokeObjectURL(prev)
+        return nextUrl
+      })
+    } finally {
+      setPreviewing(false)
+    }
   }
 
   const shareLabel = { idle: 'Share', copied: 'Copied!', error: 'Failed' }[shareState]
@@ -66,7 +78,7 @@ export default function Results() {
         actions={[
           { label: 'History', onClick: () => setShowHistory(true) },
           { label: shareLabel, onClick: handleShare, success: shareState === 'copied' },
-          { label: 'Preview PDF', onClick: handlePreviewPdf },
+          { label: previewing ? 'Preparing…' : 'Preview PDF', onClick: handlePreviewPdf, disabled: previewing },
           { label: exporting ? 'Exporting…' : 'PDF', onClick: handleExportPdf, disabled: exporting },
         ]}
       />

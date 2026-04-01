@@ -183,12 +183,13 @@ function textBlock(doc, text, x, y, opts={}) {
   doc.setFontSize(fs); doc.setFont('helvetica', opts.bold?'bold':'normal')
   doc.setTextColor(...(opts.color||C.text))
   const lines = doc.splitTextToSize(s(text), maxW)
+  const mb = opts.mb ?? 3
   for (const line of lines) {
-    y = checkPage(doc, y, fs*0.4)
+    y = checkPage(doc, y, fs * 0.352 * lh + 1.5)
     doc.text(line, x, y)
     y += fs * 0.352 * lh
   }
-  return y + (opts.mb||3)
+  return y + mb
 }
 
 function kv(doc, label, value, y, valColor) {
@@ -215,6 +216,7 @@ function table(doc, headers, rows, y, widths) {
   const maxY = PH - FOOTER_H - 12
 
   function drawHeader(startY) {
+    startY = checkPage(doc, startY, hH + 4)
     doc.setFillColor(...C.surf2)
     doc.rect(M, startY, CW, hH, 'F')
     doc.setDrawColor(...C.primary); doc.setLineWidth(0.4)
@@ -603,10 +605,10 @@ export async function exportAuditToPdf(result, description) {
   // ═══════════════════════════════════════════════════════════════════════════
   // SECTION 3 — MITIGATION STRATEGIES (Art. 9 / Annex IV §5)
   // ═══════════════════════════════════════════════════════════════════════════
-  y = sectionHeader(doc, 3, 'Simulated Bias Mitigation Strategies',
+  y = sectionHeader(doc, 3, 'Bias Mitigation Strategies (Executed)',
     'Regulation (EU) 2024/1689 — Article 9 (Risk Management System), Annex IV §5', y)
 
-  y = textBlock(doc, 'Article 9 requires a continuous risk management system throughout the AI lifecycle. Three mitigation strategies were mathematically evaluated. These are projections only — Article 9 requires actual implementation, not mere modelling. The operator must translate the recommended strategy into a documented action plan with named responsible persons and implementation milestones.', M, y, {color:C.muted, lh:1.5, mb:8})
+  y = textBlock(doc, 'Article 9 requires a continuous risk management system throughout the AI lifecycle. Three mitigation strategies were executed on this dataset using model-based methods. The operator must still document ownership, rollout controls, and monitoring milestones before deployment.', M, y, {color:C.muted, lh:1.5, mb:8})
 
   if (result.mitigation?.results?.length>0) {
     const mit = result.mitigation
@@ -619,7 +621,7 @@ export async function exportAuditToPdf(result, description) {
     y = textBlock(doc, s(mit.trade_off_summary), M+4, y+10, {maxW:CW-8, fs:8, color:C.text, mb:0})
     y += 8
 
-    const mH = ['Method','Current Bias','Projected Bias','Bias Reduction','DPD After','Est. Accuracy','Rank Score']
+    const mH = ['Method','Current Bias','Bias After','Bias Reduction','DPD After','Est. Accuracy','Rank Score']
     const mW = [35,22,22,22,20,22,17]
     const mRows = mit.results.map(r=>([
       {text:r.method==='rate_equalisation'?'Rate Equalisation':r.method.split('_').map(w=>w[0].toUpperCase()+w.slice(1)).join(' '),bold:r.method===mit.best_method},
@@ -632,12 +634,12 @@ export async function exportAuditToPdf(result, description) {
     ]))
     y = table(doc, mH, mRows, y, mW)
 
-    // Art. 9 Implementation roadmap requirement
-    y = alertBox(doc, 'ART. 9 IMPLEMENTATION ROADMAP — OPERATOR ACTION REQUIRED',
-      'Simulated strategies above are projections. Under Article 9, the operator must: (1) Name a responsible person for implementing the recommended strategy; (2) Define an implementation timeline with measurable milestones; (3) Specify a validation dataset and re-audit trigger condition; (4) Document a rollback procedure if bias escalates post-deployment; (5) Log all changes in the technical file (Art. 11 + Art. 18).',
+      // Art. 9 Implementation roadmap requirement
+      y = alertBox(doc, 'ART. 9 IMPLEMENTATION ROADMAP — OPERATOR ACTION REQUIRED',
+      'Executed strategy results are shown above. Under Article 9, the operator must: (1) Name a responsible person for implementing the selected strategy in production; (2) Define an implementation timeline with measurable milestones; (3) Specify a validation dataset and re-audit trigger condition; (4) Document a rollback procedure if bias escalates post-deployment; (5) Log all changes in the technical file (Art. 11 + Art. 18).',
       y, C.amber, 32)
   } else {
-    y = textBlock(doc, 'No mitigation simulations were completed.', M, y, {color:C.muted})
+    y = textBlock(doc, 'No mitigation method results were available.', M, y, {color:C.muted})
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1031,24 +1033,26 @@ export async function exportAuditToPdfBlob(result, description) {
   doc.setFont('helvetica','bold'); doc.setFontSize(12)
   doc.text('Overview', M, y); y += 7
   doc.setFont('helvetica','normal'); doc.setFontSize(10)
-  doc.text(doc.splitTextToSize(`Bias: ${bias} (${level}) | Risk: ${risk}`, CW), M, y); y += 10
+  y = textBlock(doc, `Bias: ${bias} (${level}) | Risk: ${risk}`, M, y, { maxW: CW, fs: 10, lh: 1.45, mb: 4 })
   if (summary) {
-    doc.text(doc.splitTextToSize(summary, CW), M, y); y += 12
+    y = textBlock(doc, summary, M, y, { maxW: CW, fs: 9.5, lh: 1.45, mb: 4 })
   }
+  y = checkPage(doc, y, 10)
   doc.setFont('helvetica','bold'); doc.text('Key Findings', M, y); y += 6
   doc.setFont('helvetica','normal')
   findings.slice(0, 6).forEach((f) => {
-    doc.text(doc.splitTextToSize(`• ${f}`, CW), M, y); y += 5
+    y = textBlock(doc, `• ${f}`, M, y, { maxW: CW, fs: 9, lh: 1.4, mb: 1 })
   })
-  y += 3
+  y += 2
+  y = checkPage(doc, y, 10)
   doc.setFont('helvetica','bold'); doc.text('Recommendations', M, y); y += 6
   doc.setFont('helvetica','normal')
   recs.slice(0, 6).forEach((r) => {
-    doc.text(doc.splitTextToSize(`• ${r}`, CW), M, y); y += 5
+    y = textBlock(doc, `• ${r}`, M, y, { maxW: CW, fs: 9, lh: 1.4, mb: 1 })
   })
-  y += 5
+  y += 3
   doc.setFontSize(8); doc.setTextColor(...C.muted)
-  doc.text(doc.splitTextToSize(`Dataset context: ${s(description || '')}`, CW), M, y)
+  y = textBlock(doc, `Dataset context: ${s(description || '')}`, M, y, { maxW: CW, fs: 8, lh: 1.4, mb: 0, color: C.muted })
   return doc.output('blob')
 }
 
@@ -1063,11 +1067,12 @@ export async function exportToPdf(prompt, aiResponse, result) {
   doc.setFontSize(13); doc.setTextColor(...C.primary); doc.setFont('helvetica','bold')
   doc.text('Original Text', M, y); y+=8
   doc.setFontSize(9.5); doc.setTextColor(...C.text); doc.setFont('helvetica','normal')
-  const pL = doc.splitTextToSize(s(prompt)||'', 170); doc.text(pL, M, y); y+=pL.length*5+15
+  y = textBlock(doc, s(prompt)||'', M, y, { maxW: CW, fs: 9.5, lh: 1.5, mb: 10 })
   doc.setFontSize(13); doc.setTextColor(...C.primary); doc.setFont('helvetica','bold')
+  y = checkPage(doc, y, 18)
   doc.text('Unbiased Rewrite', M, y); y+=8
   doc.setFontSize(9.5); doc.setTextColor(...C.text); doc.setFont('helvetica','normal')
-  const aL = doc.splitTextToSize(s(result.unbiased_response)||'', 170); doc.text(aL, M, y)
+  y = textBlock(doc, s(result.unbiased_response)||'', M, y, { maxW: CW, fs: 9.5, lh: 1.5, mb: 0 })
   doc.save(`FairLens_TextAudit_${Date.now()}.pdf`)
 }
 
@@ -1081,10 +1086,11 @@ export async function exportToPdfBlob(prompt, aiResponse, result) {
   doc.setFontSize(13); doc.setTextColor(...C.primary); doc.setFont('helvetica','bold')
   doc.text('Original Text', M, y); y+=8
   doc.setFontSize(9.5); doc.setTextColor(...C.text); doc.setFont('helvetica','normal')
-  const pL = doc.splitTextToSize(s(prompt)||'', 170); doc.text(pL, M, y); y+=pL.length*5+15
+  y = textBlock(doc, s(prompt)||'', M, y, { maxW: CW, fs: 9.5, lh: 1.5, mb: 10 })
   doc.setFontSize(13); doc.setTextColor(...C.primary); doc.setFont('helvetica','bold')
+  y = checkPage(doc, y, 18)
   doc.text('Unbiased Rewrite', M, y); y+=8
   doc.setFontSize(9.5); doc.setTextColor(...C.text); doc.setFont('helvetica','normal')
-  const aL = doc.splitTextToSize(s(result.unbiased_response)||'', 170); doc.text(aL, M, y)
+  y = textBlock(doc, s(result.unbiased_response)||'', M, y, { maxW: CW, fs: 9.5, lh: 1.5, mb: 0 })
   return doc.output('blob')
 }
