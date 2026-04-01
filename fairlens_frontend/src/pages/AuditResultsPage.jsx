@@ -625,6 +625,7 @@ export default function AuditResultsPage() {
     plain_language = {},
     sample_rows = [],
     group_rates_map = {},
+    compliance = {},
   } = result
 
   const scoreColor = bias_score < 20 ? '#4ade80' : bias_score < 45 ? '#fbbf24' : bias_score < 70 ? '#f97316' : '#f87171'
@@ -1458,12 +1459,92 @@ export default function AuditResultsPage() {
                   All fairness metrics computed in Python (audit_service.py). Gemini 2.5 Flash writes narrative text only — it never modifies numeric results.
                   Theil index uses group-level rate formula: mean((r/mean_r)·ln(r/mean_r)). Performance gap normalised to column range.
                   Statistical significance uses Pearson chi-square on the sensitive×target contingency table (scipy.stats.chi2_contingency with correction disabled).
-                  Cramér&apos;s V uses the bias-corrected formulation (Bergsma, 2013): φ²=χ²/n, φ²corr=max(0, φ²-((k−1)(r−1))/(n−1)), kcorr=k-((k−1)²/(n−1)), rcorr=r-((r−1)²/(n−1)), V=sqrt(φ²corr/min(kcorr−1, rcorr−1)).
+                  Cramér&apos;s V uses bias correction (Bergsma, 2013). Steps: φ²=χ²/n; φ²corr=max(0, φ²-((k−1)(r−1))/(n−1)); rows_corrected=r-((r−1)²/(n−1)); cols_corrected=k-((k−1)²/(n−1)); V=sqrt(φ²corr/min(cols_corrected−1, rows_corrected−1)).
                   Effect size bands: V&lt;0.10 negligible · 0.10–0.20 small · 0.20–0.40 medium · ≥0.40 large.
                   Bias score range: 0–19 = Low · 20–44 = Moderate · 45–69 = High · 70–100 = Critical.
                 </p>
               </div>
             </div>
+
+            {Array.isArray(compliance?.gap_matrix) && compliance.gap_matrix.length > 0 && (
+              <div className={styles.card}>
+                <h3 className={styles.cardTitle}>EU AI Act Gap Matrix (Dedicated)</h3>
+                {compliance?.compliance_rating && (
+                  <p className={styles.cardHint}>
+                    Compliance Rating: <strong>{Number(compliance.compliance_rating.score_1_to_10).toFixed(1)}/10</strong> — {compliance.compliance_rating.label}
+                    {' · '}{compliance.compliance_rating.rationale}
+                  </p>
+                )}
+                <div className={styles.tableWrap}>
+                  <table className={styles.table}>
+                    <thead>
+                      <tr>
+                        <th>Article</th>
+                        <th>Status</th>
+                        <th>Rationale</th>
+                        <th>Detected Gaps</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {compliance.gap_matrix.map((row, idx) => (
+                        <tr key={`${row.article}-${idx}`}>
+                          <td><strong>{row.article}</strong></td>
+                          <td>
+                            <span className={`${styles.badge} ${
+                              row.status === 'Green' ? styles.badgeGreen :
+                              row.status === 'Amber' ? styles.badgeAmber : styles.badgeRed
+                            }`}>
+                              {row.status}
+                            </span>
+                          </td>
+                          <td>{row.rationale}</td>
+                          <td>
+                            {Array.isArray(row.gaps) && row.gaps.length > 0 ? row.gaps.join(' · ') : 'No material gaps detected'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {Array.isArray(compliance?.remaining_controls) && compliance.remaining_controls.length > 0 && (
+                  <>
+                    <h3 className={styles.cardTitle} style={{ marginTop: 16 }}>Remaining Product/Process Controls</h3>
+                    <div className={styles.tableWrap}>
+                      <table className={styles.table}>
+                        <thead>
+                          <tr>
+                            <th>Control ID</th>
+                            <th>Article</th>
+                            <th>Priority</th>
+                            <th>Owner</th>
+                            <th>Required Control</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {compliance.remaining_controls.map((c, idx) => (
+                            <tr key={`${c.id || 'ctrl'}-${idx}`}>
+                              <td><strong>{c.id || 'CONTROL'}</strong></td>
+                              <td>{c.article || 'N/A'}</td>
+                              <td>
+                                <span className={`${styles.badge} ${
+                                  String(c.priority).toLowerCase() === 'high' ? styles.badgeRed :
+                                  String(c.priority).toLowerCase() === 'medium' ? styles.badgeAmber : styles.badgeGreen
+                                }`}>
+                                  {c.priority || 'medium'}
+                                </span>
+                              </td>
+                              <td>{c.owner || 'Owner not assigned'}</td>
+                              <td>{c.control || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
 
             <div className={styles.card}>
               <h3 className={styles.cardTitle}>All Columns</h3>

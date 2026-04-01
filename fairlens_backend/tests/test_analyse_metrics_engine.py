@@ -62,7 +62,6 @@ def test_run_statistical_test_returns_bias_corrected_cramers_v():
 
 
 def test_run_mitigation_label_only_keeps_tpr_fpr_unset():
-    n = 120
     groups = np.array(["A"] * 60 + ["B"] * 60)
     target = np.array(([1] * 36 + [0] * 24) + ([1] * 18 + [0] * 42))
     score = np.concatenate([np.linspace(0.1, 0.9, 60), np.linspace(0.2, 0.8, 60)])

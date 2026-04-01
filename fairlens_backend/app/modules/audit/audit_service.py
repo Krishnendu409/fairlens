@@ -30,7 +30,7 @@ LABEL-ONLY MODE:
 """
 
 import os, json, re, base64, io, ssl
-from typing import Optional
+from typing import Optional, Tuple
 from dotenv import load_dotenv
 
 import numpy as np
@@ -571,7 +571,9 @@ def run_statistical_test(df: pd.DataFrame, sensitive_col: str,
         # especially in smaller samples and non-square contingency tables.
         if n > 1:
             phi2 = float(chi2) / float(n)
+            # Finite-sample bias correction for phi^2.
             phi2_corr = max(0.0, phi2 - ((k - 1) * (r - 1)) / float(n - 1))
+            # Corrected effective table dimensions (rows/columns).
             rows_corrected = r - ((r - 1) ** 2) / float(n - 1)
             cols_corrected = k - ((k - 1) ** 2) / float(n - 1)
             denom = min(cols_corrected - 1, rows_corrected - 1)
@@ -676,11 +678,13 @@ def _compute_stability(adjusted_rates: list) -> float:
     return float(round(max(0.0, min(1.0, 1.0 - float(np.std(adjusted_rates)))), 4))
 
 
-def _compute_tpr_fpr_gaps(y_true: np.ndarray, y_pred: np.ndarray, sensitive: pd.Series) -> tuple[Optional[float], Optional[float]]:
+def _compute_tpr_fpr_gaps(y_true: np.ndarray, y_pred: np.ndarray, sensitive: pd.Series) -> Tuple[Optional[float], Optional[float]]:
     tpr_vals = []
     fpr_vals = []
     sensitive_str = sensitive.astype(str)
-    unique_groups = sorted(sensitive.unique(), key=str)
+    # Stable deterministic ordering for reporting and reproducibility.
+    # Lexicographic ordering is intentional for mixed/string group labels.
+    unique_groups = sorted(sensitive_str.unique())
     for grp in unique_groups:
         mask = sensitive_str == str(grp)
         if int(mask.sum()) == 0:
