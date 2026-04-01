@@ -567,6 +567,7 @@ export default function AuditResultsPage() {
   const [shareState, setShareState] = useState('idle')
   const [exporting, setExporting] = useState(false)
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState('')
+  const [previewingPdf, setPreviewingPdf] = useState(false)
   const [showBadgeModal, setShowBadgeModal] = useState(false)
   const [searchParams] = useSearchParams()
 
@@ -588,6 +589,13 @@ export default function AuditResultsPage() {
       try { sessionStorage.setItem('auditResult', JSON.stringify({ result, description: datasetDescription })) } catch {}
     }
   }, [result, datasetDescription])
+
+  useEffect(() => () => {
+    setPdfPreviewUrl(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return ''
+    })
+  }, [])
 
   if (!result) return (
     <div className={styles.noResult}>
@@ -664,12 +672,17 @@ export default function AuditResultsPage() {
   }
 
   async function handlePreviewPdf() {
-    const blob = await exportAuditToPdfBlob(result, datasetDescription)
-    const nextUrl = URL.createObjectURL(blob)
-    setPdfPreviewUrl(prev => {
-      if (prev) URL.revokeObjectURL(prev)
-      return nextUrl
-    })
+    setPreviewingPdf(true)
+    try {
+      const blob = await exportAuditToPdfBlob(result, datasetDescription)
+      const nextUrl = URL.createObjectURL(blob)
+      setPdfPreviewUrl(prev => {
+        if (prev) URL.revokeObjectURL(prev)
+        return nextUrl
+      })
+    } finally {
+      setPreviewingPdf(false)
+    }
   }
 
   const tabBadges = {
@@ -701,8 +714,8 @@ export default function AuditResultsPage() {
           <button className={styles.actionBtn} onClick={handleExport} disabled={exporting}>
             <Icon name="pdf" size={13}/> {exporting ? 'Generating...' : 'EU Compliance Report'}
           </button>
-          <button className={styles.actionBtn} onClick={handlePreviewPdf}>
-            <Icon name="chart" size={13}/> Preview PDF
+          <button className={styles.actionBtn} onClick={handlePreviewPdf} disabled={previewingPdf}>
+            <Icon name="chart" size={13}/> {previewingPdf ? 'Preparing...' : 'Preview PDF'}
           </button>
         </div>
       </header>
@@ -1081,19 +1094,18 @@ export default function AuditResultsPage() {
           <div className={styles.tabContent}>
             <h2 className={styles.tabTitle}>Fix Bias</h2>
             <p className={styles.tabSubtitle}>
-              Three mitigation strategies evaluated automatically.
+              Three model-executed mitigation strategies evaluated automatically.
               Ranked by: <strong>0.4 × DPD_reduction + 0.4 × est_accuracy + 0.2 × rate_stability</strong> (confidence-discounted).
-              All values are projections — actual improvement requires implementation.
+              Results are measured from executed interventions on this dataset.
             </p>
 
             {!mitigation ? (
               <div className={styles.emptyState}><p>Run an audit to see mitigation results.</p></div>
             ) : (
               <>
-                {/* Projection disclaimer */}
                 <div className={styles.projectionNotice}>
                   <Icon name="insights" size={14}/>
-                  <span>These are <strong>projected</strong> outcomes — simulations of what each technique could achieve. Actual results depend on model retraining and implementation.</span>
+                  <span>Mitigation outcomes shown below come from executed method runs (AIF360/Fairlearn/threshold optimisation) on the current audit dataset.</span>
                 </div>
 
                 {/* Banner */}
@@ -1117,8 +1129,8 @@ export default function AuditResultsPage() {
 
                 {/* Chart — use full 0-100 scale so bars are visible */}
                 <div className={styles.card}>
-                  <h3 className={styles.cardTitle}>Projected Bias Score by Method</h3>
-                  <p className={styles.cardHint}>Lower is better · Green = recommended method · All values are projections</p>
+                  <h3 className={styles.cardTitle}>Bias Score by Method</h3>
+                  <p className={styles.cardHint}>Lower is better · Green = recommended method · Values are from executed runs</p>
                   <ResponsiveContainer width="100%" height={240}>
                     <BarChart data={mitigationChartData} barCategoryGap="25%" barSize={80}>
                       <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
@@ -1128,7 +1140,7 @@ export default function AuditResultsPage() {
                         label={{ value: 'Bias Score', angle: -90, position: 'insideLeft', fill: 'var(--text-muted)', fontSize: 11 }}/>
                       <Tooltip
                         formatter={(v, n, p) => [
-                          `${v} projected bias${p.payload.accuracy != null ? ` | Accuracy: ${(p.payload.accuracy*100).toFixed(1)}%` : ''}`,
+                          `${v} bias after mitigation${p.payload.accuracy != null ? ` | Accuracy: ${(p.payload.accuracy*100).toFixed(1)}%` : ''}`,
                           p.payload.isBest ? '★ Recommended' : p.payload.name
                         ]}
                         {...tt}/>
@@ -1157,7 +1169,7 @@ export default function AuditResultsPage() {
                       <p className={styles.mitigationDesc}>{r.description}</p>
                       <div className={styles.mitigationStats}>
                         <div className={styles.mitigationStat}>
-                          <span className={styles.mitigationStatLabel}>Projected Bias</span>
+                          <span className={styles.mitigationStatLabel}>Bias After Mitigation</span>
                           <span className={styles.mitigationStatVal}
                             style={{ color: r.bias_score < 20 ? 'var(--green)' : r.bias_score < 45 ? 'var(--amber)' : 'var(--red)' }}>
                             {r.bias_score} / 100
