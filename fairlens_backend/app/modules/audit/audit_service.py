@@ -62,6 +62,15 @@ except Exception:
 
 load_dotenv()
 
+DPD_THRESHOLD = 0.10
+IMBALANCE_HIGH_THRESHOLD = 0.35
+DEFAULT_REPAIR_LEVEL = 0.60
+ROC_UNCERTAIN_LOWER_THRESHOLD = 0.40
+ROC_UNCERTAIN_UPPER_THRESHOLD = 0.60
+# Small deterministic tie-breaker (3%) used only when method scores are close,
+# so scenario-prioritized methods remain preferred without overpowering evidence.
+SCENARIO_SELECTION_BONUS = 0.03
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NUMPY SERIALISATION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -689,16 +698,16 @@ def _scenario_aware_method_selection(df: pd.DataFrame, computed: dict) -> tuple[
         "has_predictions": bool(computed.get("has_predictions", False)),
     }
 
-    if imbalance >= 0.35:
+    if imbalance >= IMBALANCE_HIGH_THRESHOLD:
         return (
             "reweighing",
             f"Dataset imbalance is high ({imbalance:.3f}), so reweighing is prioritized to rebalance training influence before optimization.",
             context,
         )
-    if dpd > 0.10:
+    if dpd > DPD_THRESHOLD:
         return (
             "threshold_optimisation",
-            f"DPD is above threshold ({dpd:.4f} > 0.10), so threshold optimization is prioritized to reduce demographic parity disparity.",
+            f"DPD is above threshold ({dpd:.4f} > {DPD_THRESHOLD:.2f}), so threshold optimization is prioritized to reduce demographic parity disparity.",
             context,
         )
     if indirect_bias:
@@ -715,7 +724,12 @@ def _scenario_aware_method_selection(df: pd.DataFrame, computed: dict) -> tuple[
 
 
 def _project_trade_off_note(before_dpd: float, after_dpd: float, before_acc: Optional[float], after_acc: Optional[float]) -> str:
-    fair_dir = "improved" if after_dpd < before_dpd else "did not improve"
+    if after_dpd < before_dpd:
+        fair_dir = "improved"
+    elif after_dpd > before_dpd:
+        fair_dir = "did not improve"
+    else:
+        fair_dir = "remained stable"
     if before_acc is None or after_acc is None:
         return f"Fairness {fair_dir} under DPD; accuracy trade-off could not be estimated from available signals."
     delta = round((after_acc - before_acc) * 100, 2)
@@ -837,7 +851,7 @@ def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
         return {"method":"threshold_optimisation","error":str(e)}
 
 
-def _method_disparate_impact_remover(df, computed, repair_level=0.6):
+def _method_disparate_impact_remover(df, computed, repair_level=DEFAULT_REPAIR_LEVEL):
     try:
         sc = computed["sensitive_col"]; tc = computed["target_col"]; pc = computed["positive_class"]
         if not sc or not tc or pc is None:
@@ -865,10 +879,6 @@ def _method_disparate_impact_remover(df, computed, repair_level=0.6):
         gs = computed.get("group_stats", [])
         acc = _compute_true_accuracy(gs, adjusted_rates)
         prec = rec = None
-        if computed.get("has_predictions"):
-            y_true = (work[tc] == pc).astype(int).to_numpy()
-            y_pred = (work[tc] == pc).astype(int).to_numpy()
-            prec, rec = _binary_pr(y_true, y_pred)
 
         return {
             "method":"disparate_impact_remover",
@@ -918,7 +928,7 @@ def _method_reject_option_classification(df, computed):
         priv = max(base_rates, key=base_rates.get)
         unpriv = min(base_rates, key=base_rates.get)
 
-        low, high = 0.40, 0.60
+        low, high = ROC_UNCERTAIN_LOWER_THRESHOLD, ROC_UNCERTAIN_UPPER_THRESHOLD
         uncertain = (y_prob >= low) & (y_prob <= high)
         adjusted_pred = np.array(y_pred, dtype=int)
         for idx, flag in enumerate(uncertain):
@@ -1160,8 +1170,10 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
         final_score = round(
             0.4 * adj_dpd_red + 0.4 * acc + 0.2 * stability, 4
         ) if valid else -1.0
+        # Small deterministic tie-breaker to preserve scenario-aware preference
+        # when measured method quality is otherwise near-identical.
         if method == selected_method and final_score >= 0:
-            final_score = round(min(1.0, final_score + 0.03), 4)
+            final_score = round(min(1.0, final_score + SCENARIO_SELECTION_BONUS), 4)
 
         # Compute projected bias score using the SAME formula as compute_raw_stats
         # so it's consistent and meaningful
@@ -1199,10 +1211,9 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
             improvement=round(before_score - proj_bias, 1),
             final_score=final_score,
             description=(
-                descriptions.get(method, "")
-                + " "
-                + _project_trade_off_note(before_dpd, dpd_after, baseline_acc, acc)
-                + ("" if valid else " ⚠ Invalid: method did not reduce bias.")
+                f"{descriptions.get(method, '').rstrip('.')}."
+                f" {_project_trade_off_note(before_dpd, dpd_after, baseline_acc, acc)}"
+                f"{'' if valid else ' ⚠ Invalid: method did not reduce bias.'}"
             ),
         ))
 
@@ -1222,16 +1233,27 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
     dpd_improv  = round(before_dpd - dpd_after_b, 4)
     pct_reduc   = round((improvement / before_score * 100), 1) if before_score > 0 else 0.0
 
+    fair_msg = (
+        "Fairness improved under selected metrics."
+        if dpd_after_b < before_dpd
+        else "Fairness did not improve under selected metrics."
+        if dpd_after_b > before_dpd
+        else "Fairness remained stable under selected metrics."
+    )
+    acc_fragment = (
+        f" Estimated accuracy after mitigation: {acc_after*100:.1f}%."
+        if acc_after is not None
+        else ""
+    )
     trade_off = (
-        f"Bias reduced from {before_score} to {bias_after} (↓{improvement} pts, {pct_reduc}% reduction). "
+        f"Bias changed from {before_score} to {bias_after} "
+        f"({'↓' if improvement >= 0 else '↑'}{abs(improvement)} pts, {abs(pct_reduc)}% magnitude). "
         f"DPD changed {before_dpd:.4f} → {dpd_after_b:.4f}; DIR tracked from {before_dir:.4f} to {best.dir:.4f}. "
-        f"Estimated accuracy after mitigation: {acc_after*100:.1f}% if available. "
-        f"Fairness improved under selected metrics, but no method guarantees perfect fairness."
+        f"{acc_fragment} "
+        f"{fair_msg} No method guarantees perfect fairness."
     )
     reason = (
-        f"{best.method.replace('_',' ').title()} selected via scenario-aware policy. "
-        f"{selection_reason} "
-        f"Chosen method "
+        f"{best.method.replace('_',' ').title()} selected via scenario-aware policy. {selection_reason} "
         f"(rank={best.final_score:.3f}): "
         f"DPD {before_dpd:.4f} → {dpd_after_b:.4f} (↓{dpd_improv:.4f}), "
         f"projected bias {before_score} → {bias_after}, "
