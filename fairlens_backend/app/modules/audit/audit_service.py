@@ -1486,7 +1486,7 @@ def _fix_json(s: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def merge_into_response(stats, ai, root_causes, bias_origin_dict,
-                        mitigation, stat_test, reliability_dict) -> AuditResponse:
+                        mitigation, stat_test, reliability_dict, privacy_mode: bool = False) -> AuditResponse:
     c       = stats["computed"]
     # Guard: Gemini may return None or a list for metric_interpretations
     raw_interps = ai.get("metric_interpretations", {})
@@ -1545,6 +1545,7 @@ def merge_into_response(stats, ai, root_causes, bias_origin_dict,
     return AuditResponse(
         bias_score=c["bias_score"], bias_level=c["bias_level"],
         risk_label=c["risk_label"], bias_detected=c["bias_detected"],
+        privacy_mode=privacy_mode,
         total_rows=c["total_rows"], columns=c["columns"],
         sensitive_column=c.get("sensitive_col"),
         target_column=c.get("target_col"),
@@ -1706,7 +1707,7 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
     try:
         response = merge_into_response(
             stats, ai, root_causes, bias_origin_dict,
-            mitigation, stat_test, reliability_dict,
+            mitigation, stat_test, reliability_dict, request.privacy_mode,
         )
         final_compliance = evaluate_eu_ai_act(
             bias_score=c["bias_score"],

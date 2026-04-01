@@ -148,6 +148,7 @@ class AuditResponse(BaseModel):
     bias_level: str
     risk_label: str
     bias_detected: bool
+    privacy_mode: bool = False
 
     total_rows: int
     columns: List[str]

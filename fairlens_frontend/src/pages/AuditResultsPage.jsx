@@ -566,7 +566,6 @@ export default function AuditResultsPage() {
   const [activeTab, setActiveTab] = useState('summary')
   const [shareState, setShareState] = useState('idle')
   const [exporting, setExporting] = useState(false)
-  const [pdfPreviewUrl, setPdfPreviewUrl] = useState('')
   const [previewingPdf, setPreviewingPdf] = useState(false)
   const [pdfPreviewError, setPdfPreviewError] = useState('')
   const [showBadgeModal, setShowBadgeModal] = useState(false)
@@ -596,13 +595,6 @@ export default function AuditResultsPage() {
     setComplianceDraft(result?.compliance_metadata || {})
   }, [result])
 
-  useEffect(() => () => {
-    setPdfPreviewUrl(prev => {
-      if (prev) URL.revokeObjectURL(prev)
-      return ''
-    })
-  }, [])
-
   if (!result) return (
     <div className={styles.noResult}>
       <p>No audit data found.</p>
@@ -625,6 +617,7 @@ export default function AuditResultsPage() {
     plain_language = {},
     sample_rows = [],
     group_rates_map = {},
+    privacy_mode = false,
   } = result
 
   const scoreColor = bias_score < 20 ? '#4ade80' : bias_score < 45 ? '#fbbf24' : bias_score < 70 ? '#f97316' : '#f87171'
@@ -687,13 +680,15 @@ export default function AuditResultsPage() {
       const payload = { ...result, compliance_metadata: { ...(result?.compliance_metadata || {}), ...complianceDraft } }
       const blob = await exportAuditToPdfBlob(payload, datasetDescription)
       const nextUrl = URL.createObjectURL(blob)
-      setPdfPreviewUrl(prev => {
-        if (prev) URL.revokeObjectURL(prev)
-        return nextUrl
-      })
+      const previewTab = window.open(nextUrl, '_blank', 'noopener,noreferrer')
+      if (!previewTab) {
+        URL.revokeObjectURL(nextUrl)
+        throw new Error('Popup blocked')
+      }
+      setTimeout(() => URL.revokeObjectURL(nextUrl), 60_000)
     } catch (error) {
       console.error('PDF preview failed:', error)
-      setPdfPreviewError('Preview failed. Check missing required fields.')
+      setPdfPreviewError('Preview failed. Allow popups and check required fields.')
     } finally {
       setPreviewingPdf(false)
     }
@@ -754,42 +749,39 @@ export default function AuditResultsPage() {
             <h3 className={styles.sectionTitle} style={{ color: 'var(--red)' }}>Preview failed. Check missing required fields.</h3>
           </div>
         )}
-        {pdfPreviewUrl && (
-          <div className={styles.card}>
-            <h3 className={styles.sectionTitle}>PDF Preview</h3>
-            <iframe title="Audit PDF Preview" src={pdfPreviewUrl} style={{ width: '100%', minHeight: 500, border: '1px solid var(--border)', borderRadius: 8 }} />
-          </div>
-        )}
-
         {activeTab === 'summary' && (
           <div className={styles.card}>
-            <h3 className={styles.sectionTitle}>Compliance Metadata (for report only)</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
-              {[
-                ['dataset_name', 'Dataset name'],
-                ['dataset_version', 'Dataset version'],
-                ['data_source', 'Data source'],
-                ['lawful_basis', 'Lawful basis'],
-                ['purpose_of_processing', 'Purpose of processing'],
-                ['dpia_status', 'DPIA status'],
-                ['oversight_contact', 'Human oversight contact'],
-                ['security_assessment_status', 'Security assessment'],
-                ['monitoring_frequency', 'Monitoring frequency'],
-                ['intended_use', 'Intended use'],
-                ['system_limitations', 'System limitations'],
-                ['log_retention_policy', 'Log retention policy'],
-              ].map(([key, label]) => (
-                <label key={key} style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
-                  <span>{label}</span>
-                  <input
-                    value={complianceDraft?.[key] || ''}
-                    onChange={(e) => setComplianceDraft((prev) => ({ ...prev, [key]: e.target.value }))}
-                    placeholder="NOT PROVIDED"
-                    style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)' }}
-                  />
-                </label>
-              ))}
-            </div>
+            {!privacy_mode && (
+              <>
+                <h3 className={styles.sectionTitle}>Compliance Metadata (for report only)</h3>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+                  {[
+                    ['dataset_name', 'Dataset name'],
+                    ['dataset_version', 'Dataset version'],
+                    ['data_source', 'Data source'],
+                    ['lawful_basis', 'Lawful basis'],
+                    ['purpose_of_processing', 'Purpose of processing'],
+                    ['dpia_status', 'DPIA status'],
+                    ['oversight_contact', 'Human oversight contact'],
+                    ['security_assessment_status', 'Security assessment'],
+                    ['monitoring_frequency', 'Monitoring frequency'],
+                    ['intended_use', 'Intended use'],
+                    ['system_limitations', 'System limitations'],
+                    ['log_retention_policy', 'Log retention policy'],
+                  ].map(([key, label]) => (
+                    <label key={key} style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
+                      <span>{label}</span>
+                      <input
+                        value={complianceDraft?.[key] || ''}
+                        onChange={(e) => setComplianceDraft((prev) => ({ ...prev, [key]: e.target.value }))}
+                        placeholder="NOT PROVIDED"
+                        style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)' }}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         )}
 

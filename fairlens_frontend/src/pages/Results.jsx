@@ -19,7 +19,6 @@ export default function Results() {
   const [shareState, setShareState] = useState('idle')
   const [showHistory, setShowHistory] = useState(false)
   const [exporting, setExporting] = useState(false)
-  const [pdfPreviewUrl, setPdfPreviewUrl] = useState('')
   const [previewing, setPreviewing] = useState(false)
 
   const sharedParam = searchParams.get('shared')
@@ -31,12 +30,6 @@ export default function Results() {
 
   const { result, prompt, aiResponse } = stateData || {}
   useEffect(() => { if (!result) navigate('/', { replace: true }) }, [result, navigate])
-  useEffect(() => () => {
-    setPdfPreviewUrl(prev => {
-      if (prev) URL.revokeObjectURL(prev)
-      return ''
-    })
-  }, [])
   if (!result) return null
 
   async function handleShare() {
@@ -59,10 +52,12 @@ export default function Results() {
     try {
       const blob = await exportToPdfBlob(prompt, aiResponse, result)
       const nextUrl = URL.createObjectURL(blob)
-      setPdfPreviewUrl(prev => {
-        if (prev) URL.revokeObjectURL(prev)
-        return nextUrl
-      })
+      const previewTab = window.open(nextUrl, '_blank', 'noopener,noreferrer')
+      if (!previewTab) {
+        URL.revokeObjectURL(nextUrl)
+        throw new Error('Popup blocked')
+      }
+      setTimeout(() => URL.revokeObjectURL(nextUrl), 60_000)
     } finally {
       setPreviewing(false)
     }
@@ -133,12 +128,6 @@ export default function Results() {
           <p className={styles.promptText}>{prompt}</p>
         </div>
 
-        {pdfPreviewUrl && (
-          <div className={styles.card}>
-            <p className={styles.cardTitle}>PDF Preview</p>
-            <iframe title="PDF preview" src={pdfPreviewUrl} style={{ width: '100%', minHeight: '480px', border: '1px solid var(--border)', borderRadius: '8px' }} />
-          </div>
-        )}
       </main>
 
       <footer className={styles.footer}>
