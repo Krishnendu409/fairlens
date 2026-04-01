@@ -687,20 +687,22 @@ export default function AuditResultsPage() {
   }
 
   async function handlePreviewPdf() {
+    const previewTab = window.open('', '_blank')
     setPreviewingPdf(true)
     setPdfPreviewError('')
     try {
+      if (!previewTab) {
+        throw new Error('Popup blocked')
+      }
+      previewTab.document.write('<!doctype html><title>Generating PDF preview…</title><p style="font-family:sans-serif;padding:16px">Generating PDF preview…</p>')
       const payload = { ...result, compliance_metadata: { ...(result?.compliance_metadata || {}), ...complianceDraft } }
       const blob = await exportAuditToPdfBlob(payload, datasetDescription)
       const nextUrl = URL.createObjectURL(blob)
-      const previewTab = window.open(nextUrl, '_blank', 'noopener,noreferrer')
-      if (!previewTab) {
-        URL.revokeObjectURL(nextUrl)
-        throw new Error('Popup blocked')
-      }
+      previewTab.location.href = nextUrl
       setTimeout(() => URL.revokeObjectURL(nextUrl), 60_000)
     } catch (error) {
       console.error('PDF preview failed:', error)
+      if (previewTab && !previewTab.closed) previewTab.close()
       if (String(error?.message || '').toLowerCase().includes('popup blocked')) {
         setPdfPreviewError('Preview failed because popup was blocked. Allow popups and try again.')
       } else if (String(error?.message || '').toLowerCase().includes('invalid audit result payload')) {

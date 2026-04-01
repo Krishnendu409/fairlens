@@ -760,23 +760,27 @@ def _scenario_aware_method_selection(df: pd.DataFrame, computed: dict) -> tuple[
     }
 
     if imbalance >= IMBALANCE_HIGH_THRESHOLD:
+        context["scenario"] = "high_imbalance"
         return (
             "reweighing",
             f"Dataset imbalance is high ({imbalance:.3f}), so reweighing is prioritized to rebalance training influence before optimization.",
             context,
         )
     if dpd > DPD_THRESHOLD:
+        context["scenario"] = "high_dpd"
         return (
             "threshold_optimisation",
             f"DPD is above threshold ({dpd:.4f} > {DPD_THRESHOLD:.2f}), so threshold optimization is prioritized to reduce demographic parity disparity.",
             context,
         )
     if indirect_bias:
+        context["scenario"] = "indirect_bias"
         return (
             "disparate_impact_remover",
             f"Indirect bias indicators are elevated (Theil/feature-gap signal), so disparate impact remover is prioritized.",
             context,
         )
+    context["scenario"] = "boundary_uncertainty"
     return (
         "reject_option_classification",
         "Bias is present but no dominant pre-condition triggered; reject option classification is selected to improve fairness near the decision boundary.",
@@ -797,6 +801,61 @@ def _project_trade_off_note(before_dpd: float, after_dpd: float, before_acc: Opt
     if delta >= 0:
         return f"Fairness {fair_dir} under DPD while estimated accuracy changed by +{delta:.2f} points."
     return f"Fairness {fair_dir} under DPD with an estimated accuracy decrease of {abs(delta):.2f} points."
+
+
+def _scenario_weighted_bias_score(
+    *,
+    dpd: float,
+    dir_: Optional[float],
+    tpr_gap: Optional[float],
+    fpr_gap: Optional[float],
+    has_predictions: bool,
+    scenario: Optional[str],
+) -> float:
+    """
+    Scenario-aware projected bias score:
+    - uses the same normalized violation functions as compute_raw_stats
+    - adjusts metric weights by active bias scenario
+    """
+    dpd_v = min(float(dpd) / 0.10, 1.0)
+    dir_v = (
+        0.0
+        if dir_ is not None and float(dir_) >= 0.80
+        else (min((0.80 - float(dir_)) / 0.80, 1.0) if dir_ is not None else 1.0)
+    )
+    weighted = [(dpd_v, 1.0), (dir_v, 1.0)]
+
+    if has_predictions and tpr_gap is not None and fpr_gap is not None:
+        tpr_v = min(float(tpr_gap) / 0.10, 1.0)
+        fpr_v = min(float(fpr_gap) / 0.10, 1.0)
+        weighted.extend([(tpr_v, 1.0), (fpr_v, 1.0)])
+
+    if scenario == "high_imbalance":
+        weighted = [
+            (v, 1.6 if idx in (0, 1) else w)
+            for idx, (v, w) in enumerate(weighted)
+        ]
+    elif scenario == "high_dpd":
+        weighted = [
+            (v, 1.8 if idx == 0 else (1.2 if idx == 1 else w))
+            for idx, (v, w) in enumerate(weighted)
+        ]
+    elif scenario == "indirect_bias":
+        weighted = [
+            (v, 1.4 if idx == 1 else (1.2 if idx == 0 else w))
+            for idx, (v, w) in enumerate(weighted)
+        ]
+    elif scenario == "boundary_uncertainty" and len(weighted) > 2:
+        weighted = [
+            (v, 1.4 if idx >= 2 else w)
+            for idx, (v, w) in enumerate(weighted)
+        ]
+
+    total_weight = float(sum(w for _, w in weighted))
+    if total_weight <= 0:
+        return 0.0
+    weighted_mean = float(sum(v * w for v, w in weighted) / total_weight)
+    return round(max(0.0, min(100.0, weighted_mean * 100.0)), 1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1180,8 +1239,12 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
 
     selected_method, selection_reason, selection_context = _scenario_aware_method_selection(df, computed)
 
+    rw_primary = _real_method_aif360_reweighing(df, computed)
+    if rw_primary.get("error") == "aif360 not available":
+        rw_primary = _method_reweighing(df, computed)
+
     raw_results = [
-        _real_method_aif360_reweighing(df, computed),
+        rw_primary,
         _method_disparate_impact_remover(df, computed),
         _method_threshold_optimisation(df, computed),
         _method_reject_option_classification(df, computed),
@@ -1230,29 +1293,25 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
 
         stability     = _compute_stability([float(x) for x in adj_rates])
 
-        # Rank: 40% DPD reduction, 40% accuracy, 20% stability
+        # Rank (formula): 60% fairness gain, 30% accuracy, 10% stability
         final_score = round(
-            0.4 * adj_dpd_red + 0.4 * acc + 0.2 * stability, 4
+            0.6 * adj_dpd_red + 0.3 * acc + 0.1 * stability, 4
         ) if valid else -1.0
         # Small deterministic tie-breaker to preserve scenario-aware preference
         # when measured method quality is otherwise near-identical.
         if method == selected_method and final_score >= 0:
             final_score = round(min(1.0, final_score + SCENARIO_SELECTION_BONUS), 4)
 
-        # Compute projected bias score using the SAME formula as compute_raw_stats
-        # so it's consistent and meaningful
-        proj_dpd_v = min(dpd_after / 0.10, 1.0)
-        proj_dir_v = (0.0 if dir_after is not None and dir_after >= 0.80
-                      else (min((0.80 - dir_after) / 0.80, 1.0) if dir_after is not None else 1.0))
-        proj_violations = [proj_dpd_v, proj_dir_v]
         tpr_gap_val = r.get("tpr_gap") if isinstance(r, dict) else None
         fpr_gap_val = r.get("fpr_gap") if isinstance(r, dict) else None
-        # Keep projected EO contribution symmetric with baseline scoring:
-        # only include EO penalties when both gaps are available.
-        if computed.get("has_predictions") and tpr_gap_val is not None and fpr_gap_val is not None:
-            proj_violations.append(min(float(tpr_gap_val) / 0.10, 1.0))
-            proj_violations.append(min(float(fpr_gap_val) / 0.10, 1.0))
-        proj_bias  = round(float(np.mean(proj_violations)) * 100, 1)
+        proj_bias = _scenario_weighted_bias_score(
+            dpd=dpd_after,
+            dir_=dir_after,
+            tpr_gap=tpr_gap_val,
+            fpr_gap=fpr_gap_val,
+            has_predictions=bool(computed.get("has_predictions")),
+            scenario=selection_context.get("scenario"),
+        )
 
         dpd_val     = dpd_after
 

@@ -48,16 +48,20 @@ export default function Results() {
     finally { setExporting(false) }
   }
   async function handlePreviewPdf() {
+    const previewTab = window.open('', '_blank')
     setPreviewing(true)
     try {
-      const blob = await exportToPdfBlob(prompt, aiResponse, result)
-      const nextUrl = URL.createObjectURL(blob)
-      const previewTab = window.open(nextUrl, '_blank', 'noopener,noreferrer')
       if (!previewTab) {
-        URL.revokeObjectURL(nextUrl)
         throw new Error('Popup blocked')
       }
+      previewTab.document.write('<!doctype html><title>Generating PDF preview…</title><p style="font-family:sans-serif;padding:16px">Generating PDF preview…</p>')
+      const blob = await exportToPdfBlob(prompt, aiResponse, result)
+      const nextUrl = URL.createObjectURL(blob)
+      previewTab.location.href = nextUrl
       setTimeout(() => URL.revokeObjectURL(nextUrl), 60_000)
+    } catch (error) {
+      if (previewTab && !previewTab.closed) previewTab.close()
+      throw error
     } finally {
       setPreviewing(false)
     }
