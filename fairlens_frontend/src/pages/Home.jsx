@@ -81,7 +81,13 @@ export default function Home() {
         sensitiveColumn: sensitiveCol || null,
         sensitiveColumn2: sensitiveCol2 || null,
       })
-      saveToAuditHistory({ id: generateId(), timestamp: Date.now(), description: description.trim(), result })
+      saveToAuditHistory({
+        id: generateId(),
+        timestamp: Date.now(),
+        description: description.trim(),
+        audit_id: result?.audit_id || null,
+        result,
+      })
       navigate('/audit-results', { state: { result, description: description.trim() } })
     } catch (err) {
       setAuditError(`Audit failed: ${err?.response?.data?.detail || err.message}`)
@@ -89,7 +95,15 @@ export default function Home() {
   }
 
   function handleAuditHistoryOpen(entry) {
-    navigate('/audit-results', { state: { result: entry.result, description: entry.description || '' } })
+    if (entry.result) {
+      navigate('/audit-results', { state: { result: entry.result, description: entry.description || '' } })
+      return
+    }
+    if (entry.audit_id) {
+      navigate(`/audit-results?id=${encodeURIComponent(entry.audit_id)}`)
+      return
+    }
+    navigate('/audit-results')
   }
 
   async function runSample(datasetName) {
@@ -97,7 +111,13 @@ export default function Home() {
     setAuditLoading(true)
     try {
       const result = await sampleAudit(datasetName)
-      saveToAuditHistory({ id: generateId(), timestamp: Date.now(), description: `Sample: ${datasetName}`, result })
+      saveToAuditHistory({
+        id: generateId(),
+        timestamp: Date.now(),
+        description: `Sample: ${datasetName}`,
+        audit_id: result?.audit_id || null,
+        result,
+      })
       navigate('/audit-results', { state: { result, description: `Sample: ${datasetName}` } })
     } catch (err) {
       setAuditError(`Sample audit failed: ${err?.response?.data?.detail || err.message}`)

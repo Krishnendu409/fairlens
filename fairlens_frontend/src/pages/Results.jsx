@@ -22,14 +22,30 @@ export default function Results() {
   const [previewing, setPreviewing] = useState(false)
 
   const sharedParam = searchParams.get('shared')
+  const [shareError, setShareError] = useState('')
   let stateData = location.state
   if (!stateData && sharedParam) {
     const decoded = decodeShareData(sharedParam)
-    if (decoded) stateData = decoded
+    if (decoded?.data) stateData = decoded.data
+    else if (decoded?.error) setShareError(decoded.error)
   }
 
   const { result, prompt, aiResponse } = stateData || {}
-  useEffect(() => { if (!result) navigate('/', { replace: true }) }, [result, navigate])
+  useEffect(() => {
+    if (!result && !shareError) navigate('/', { replace: true })
+  }, [result, navigate, shareError])
+  if (shareError) {
+    return (
+      <div className={styles.page}>
+        <main className={styles.main}>
+          <div className={styles.card}>
+            <p className={styles.cardTitle}>Share link error</p>
+            <p className={styles.promptText}>{shareError}</p>
+          </div>
+        </main>
+      </div>
+    )
+  }
   if (!result) return null
 
   async function handleShare() {

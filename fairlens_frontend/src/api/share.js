@@ -13,15 +13,23 @@ export function encodeShareData(data) {
 
 export function decodeShareData(encoded) {
   try {
-    return JSON.parse(decodeURIComponent(atob(encoded)))
-  } catch { return null }
+    return { data: JSON.parse(decodeURIComponent(atob(encoded))), error: null }
+  } catch {
+    return { data: null, error: 'Invalid or corrupted shared link.' }
+  }
 }
 
-export function buildShareUrl(data) {
-  const encoded = encodeShareData(data)
+export function buildShareUrl(dataOrAuditId, options = {}) {
+  if (typeof dataOrAuditId === 'string' && dataOrAuditId.trim()) {
+    return `${window.location.origin}/audit-results?id=${encodeURIComponent(dataOrAuditId.trim())}`
+  }
+
+  if (options.forceAuditId) return null
+
+  const encoded = encodeShareData(dataOrAuditId)
   if (!encoded) return null
 
   // Route audit shares to /audit-results, text shares to /results
-  const route = data.type === 'audit' ? '/audit-results' : '/results'
+  const route = dataOrAuditId.type === 'audit' ? '/audit-results' : '/results'
   return `${window.location.origin}${route}?shared=${encoded}`
 }

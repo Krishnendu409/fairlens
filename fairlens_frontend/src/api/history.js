@@ -24,7 +24,18 @@ export function deleteHistoryItem(id) {
 // ── Audit history ─────────────────────────────────────────────────────────
 export function getAuditHistory() { return get(AUDIT_KEY) }
 export function saveToAuditHistory(entry) {
-  const h = getAuditHistory(); h.unshift(entry)
+  const compact = {
+    id: entry?.id,
+    timestamp: entry?.timestamp,
+    description: entry?.description || '',
+    audit_id: entry?.audit_id || entry?.result?.audit_id || null,
+    bias_score: entry?.result?.bias_score ?? entry?.bias_score ?? null,
+    bias_level: entry?.result?.bias_level ?? entry?.bias_level ?? null,
+    total_rows: entry?.result?.total_rows ?? entry?.total_rows ?? null,
+    sensitive_column: entry?.result?.sensitive_column ?? entry?.sensitive_column ?? null,
+    target_column: entry?.result?.target_column ?? entry?.target_column ?? null,
+  }
+  const h = getAuditHistory(); h.unshift(compact)
   if (h.length > MAX) h.splice(MAX)
   save(AUDIT_KEY, h)
 }
