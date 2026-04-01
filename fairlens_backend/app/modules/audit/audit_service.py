@@ -48,18 +48,6 @@ from app.modules.audit.audit_utils import compute_integrity_hash
 from app.modules.audit.compliance_engine import evaluate_eu_ai_act
 from app.modules.audit.compliance_store import JSONStorageManager
 
-try:
-    from fairlearn.reductions import DemographicParity, ExponentiatedGradient
-except Exception:
-    DemographicParity = None
-    ExponentiatedGradient = None
-try:
-    from aif360.algorithms.preprocessing import Reweighing
-    from aif360.datasets import BinaryLabelDataset
-except Exception:
-    Reweighing = None
-    BinaryLabelDataset = None
-
 load_dotenv()
 
 DPD_THRESHOLD = 0.10
@@ -70,6 +58,37 @@ ROC_UNCERTAIN_UPPER_THRESHOLD = 0.60
 # Small deterministic tie-breaker (3%) used only when method scores are close,
 # so scenario-prioritized methods remain preferred without overpowering evidence.
 SCENARIO_SELECTION_BONUS = 0.03
+
+DOMAIN_SCENARIO_KEYWORDS = {
+    "hr_employment": {
+        "employment", "hiring", "recruitment", "hr", "applicant", "candidate", "promotion", "workforce", "salary"
+    },
+    "finance_credit": {
+        "finance", "financial", "loan", "credit", "bank", "mortgage", "underwriting", "insurance", "premium"
+    },
+    "healthcare": {
+        "health", "healthcare", "medical", "hospital", "patient", "diagnosis", "clinical", "triage", "treatment"
+    },
+    "education": {
+        "education", "school", "student", "admission", "university", "college", "exam", "grade", "scholarship"
+    },
+    "justice_public_safety": {
+        "justice", "criminal", "police", "court", "recidivism", "bail", "sentencing", "risk assessment", "public safety"
+    },
+    "sports_selection": {
+        "sport", "sports", "athlete", "player", "team", "draft", "selection", "coach", "scouting"
+    },
+}
+
+DOMAIN_METHOD_POLICY = {
+    "hr_employment": "reweighing",
+    "finance_credit": "threshold_optimisation",
+    "healthcare": "reject_option_classification",
+    "education": "reweighing",
+    "justice_public_safety": "reject_option_classification",
+    "sports_selection": "threshold_optimisation",
+    "general": "reweighing",
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NUMPY SERIALISATION HELPERS
@@ -724,13 +743,42 @@ def _compute_dataset_imbalance(y_bin: np.ndarray) -> float:
     return round(float((maj - minc) / maj), 4)
 
 
-def _detect_indirect_bias(computed: dict) -> bool:
-    avg_gap = float(computed.get("avg_gap") or 0.0)
-    theil = float(computed.get("theil") or 0.0)
-    return bool(avg_gap > 5.0 or theil > 0.05)
+def _infer_dataset_domain_scenario(
+    df: pd.DataFrame,
+    computed: dict,
+    dataset_description: Optional[str] = None,
+) -> tuple[str, float, list[str]]:
+    description_text = str(dataset_description or "").lower()
+    column_text = " ".join([str(c).lower() for c in df.columns])
+    sensitive_col = str(computed.get("sensitive_col") or "").lower()
+    target_col = str(computed.get("target_col") or "").lower()
+    corpus = f"{description_text} {column_text} {sensitive_col} {target_col}"
+
+    scores = {}
+    evidence = {}
+    for scenario, keywords in DOMAIN_SCENARIO_KEYWORDS.items():
+        hits = sorted([kw for kw in keywords if kw in corpus])
+        scores[scenario] = len(hits)
+        evidence[scenario] = hits
+
+    best_scenario = "general"
+    best_hits = 0
+    for scenario, score in scores.items():
+        if score > best_hits:
+            best_scenario = scenario
+            best_hits = score
+
+    if best_hits == 0:
+        return "general", 0.0, []
+    confidence = round(min(1.0, best_hits / 3.0), 2)
+    return best_scenario, confidence, evidence.get(best_scenario, [])
 
 
-def _scenario_aware_method_selection(df: pd.DataFrame, computed: dict) -> tuple[str, str, dict]:
+def _scenario_aware_method_selection(
+    df: pd.DataFrame,
+    computed: dict,
+    dataset_description: Optional[str] = None,
+) -> tuple[str, str, dict]:
     dpd = float(computed.get("dpd", 0.0))
     dir_ = computed.get("dir_", 1.0)
     dir_val = float(dir_) if dir_ is not None else 0.0
@@ -739,15 +787,22 @@ def _scenario_aware_method_selection(df: pd.DataFrame, computed: dict) -> tuple[
     selection_rate_spread = round(max(rates) - min(rates), 4) if len(rates) >= 2 else 0.0
     sensitive_col = computed.get("sensitive_col")
 
-    y_bin = None
-    imbalance = 0.0
     tc = computed.get("target_col")
     pc = computed.get("positive_class")
+    imbalance = 0.0
     if tc and tc in df.columns and pc is not None:
         y_bin = (df[tc] == pc).astype(int).to_numpy()
         imbalance = _compute_dataset_imbalance(y_bin)
 
-    indirect_bias = _detect_indirect_bias(computed)
+    scenario, scenario_confidence, scenario_evidence = _infer_dataset_domain_scenario(
+        df, computed, dataset_description
+    )
+    selected_method = DOMAIN_METHOD_POLICY.get(scenario, "reweighing")
+    reason = (
+        f"Dataset domain scenario '{scenario}' detected "
+        f"(confidence={scenario_confidence:.2f}) using dataset description/columns; "
+        f"{selected_method.replace('_', ' ')} is prioritized by domain mitigation policy."
+    )
 
     context = {
         "protected_attribute": sensitive_col,
@@ -755,37 +810,13 @@ def _scenario_aware_method_selection(df: pd.DataFrame, computed: dict) -> tuple[
         "dpd": round(dpd, 4),
         "dir": round(dir_val, 4),
         "dataset_imbalance": imbalance,
-        "indirect_bias_suspected": indirect_bias,
         "has_predictions": bool(computed.get("has_predictions", False)),
+        "scenario": scenario,
+        "scenario_confidence": scenario_confidence,
+        "scenario_evidence": scenario_evidence,
+        "scenario_source": "dataset_description_and_columns",
     }
-
-    if imbalance >= IMBALANCE_HIGH_THRESHOLD:
-        context["scenario"] = "high_imbalance"
-        return (
-            "reweighing",
-            f"Dataset imbalance is high ({imbalance:.3f}), so reweighing is prioritized to rebalance training influence before optimization.",
-            context,
-        )
-    if dpd > DPD_THRESHOLD:
-        context["scenario"] = "high_dpd"
-        return (
-            "threshold_optimisation",
-            f"DPD is above threshold ({dpd:.4f} > {DPD_THRESHOLD:.2f}), so threshold optimization is prioritized to reduce demographic parity disparity.",
-            context,
-        )
-    if indirect_bias:
-        context["scenario"] = "indirect_bias"
-        return (
-            "disparate_impact_remover",
-            f"Indirect bias indicators are elevated (Theil/feature-gap signal), so disparate impact remover is prioritized.",
-            context,
-        )
-    context["scenario"] = "boundary_uncertainty"
-    return (
-        "reject_option_classification",
-        "Bias is present but no dominant pre-condition triggered; reject option classification is selected to improve fairness near the decision boundary.",
-        context,
-    )
+    return selected_method, reason, context
 
 
 def _project_trade_off_note(before_dpd: float, after_dpd: float, before_acc: Optional[float], after_acc: Optional[float]) -> str:
@@ -835,19 +866,24 @@ def _scenario_weighted_bias_score(
             (v, 1.6 if idx in (0, 1) else w)
             for idx, (v, w) in enumerate(weighted)
         ]
-    elif scenario == "high_dpd":
+    elif scenario == "hr_employment":
         weighted = [
             (v, 1.8 if idx == 0 else (1.2 if idx == 1 else w))
             for idx, (v, w) in enumerate(weighted)
         ]
-    elif scenario == "indirect_bias":
+    elif scenario == "finance_credit":
         weighted = [
             (v, 1.4 if idx == 1 else (1.2 if idx == 0 else w))
             for idx, (v, w) in enumerate(weighted)
         ]
-    elif scenario == "boundary_uncertainty" and len(weighted) > 2:
+    elif scenario in {"healthcare", "justice_public_safety"} and len(weighted) > 2:
         weighted = [
             (v, 1.4 if idx >= 2 else w)
+            for idx, (v, w) in enumerate(weighted)
+        ]
+    elif scenario in {"education", "sports_selection"}:
+        weighted = [
+            (v, 1.5 if idx == 0 else (1.1 if idx == 1 else w))
             for idx, (v, w) in enumerate(weighted)
         ]
 
@@ -1099,98 +1135,11 @@ def _prepare_training_frame(df: pd.DataFrame, computed: dict):
     return train_df, y, sensitive
 
 
-def _real_method_fairlearn(df: pd.DataFrame, computed: dict):
-    if DemographicParity is None or ExponentiatedGradient is None:
-        return {"method": "fairlearn_exponentiated_gradient", "error": "fairlearn not available"}
-    try:
-        from sklearn.linear_model import LogisticRegression
-        X, y, sensitive = _prepare_training_frame(df, computed)
-        if X is None:
-            return {"method": "fairlearn_exponentiated_gradient", "error": "insufficient columns"}
-        base = LogisticRegression(max_iter=200)
-        mitigator = ExponentiatedGradient(base, constraints=DemographicParity())
-        mitigator.fit(X, y, sensitive_features=sensitive)
-        y_pred = mitigator.predict(X)
-
-        groups = sorted(sensitive.unique(), key=str)
-        rates = []
-        for grp in groups:
-            mask = sensitive.astype(str) == str(grp)
-            rates.append(round(float(np.mean(y_pred[mask] == 1)), 4))
-        acc = float(round(np.mean(y_pred == y), 4))
-        dpd_after, dir_after = _compute_dpd_dir_from_rates(rates)
-        return {
-            "method": "fairlearn_exponentiated_gradient",
-            "accuracy": acc,
-            "dpd": dpd_after,
-            "dir": dir_after,
-            "tpr_gap": None,
-            "fpr_gap": None,
-            "adjusted_rates": rates,
-        }
-    except Exception as e:
-        return {"method": "fairlearn_exponentiated_gradient", "error": str(e)}
-
-
-def _real_method_aif360_reweighing(df: pd.DataFrame, computed: dict):
-    if Reweighing is None or BinaryLabelDataset is None:
-            return {"method": "reweighing", "error": "aif360 not available"}
-    try:
-        from sklearn.linear_model import LogisticRegression
-        sc = computed["sensitive_col"]
-        tc = computed["target_col"]
-        if not sc or not tc:
-            return {"method": "reweighing", "error": "insufficient columns"}
-
-        data = df.copy()
-        data[tc] = (data[tc] == computed.get("positive_class")).astype(int)
-        if not pd.api.types.is_numeric_dtype(data[sc]):
-            data[sc] = pd.factorize(data[sc].astype(str))[0]
-
-        bld = BinaryLabelDataset(
-            favorable_label=1,
-            unfavorable_label=0,
-            df=data[[c for c in data.columns if c in df.columns]],
-            label_names=[tc],
-            protected_attribute_names=[sc],
-        )
-        rw = Reweighing(unprivileged_groups=[{sc: 0}], privileged_groups=[{sc: 1}])
-        rw_fit = rw.fit_transform(bld)
-
-        X, y, sensitive = _prepare_training_frame(df, computed)
-        if X is None:
-            return {"method": "reweighing", "error": "insufficient columns"}
-        model = LogisticRegression(max_iter=200)
-        weights = np.array(rw_fit.instance_weights).flatten()
-        model.fit(X, y, sample_weight=weights[: len(y)])
-        y_pred = model.predict(X)
-
-        groups = sorted(sensitive.unique(), key=str)
-        rates = []
-        for grp in groups:
-            mask = sensitive.astype(str) == str(grp)
-            rates.append(round(float(np.mean(y_pred[mask] == 1)), 4))
-        acc = float(round(np.mean(y_pred == y), 4))
-        dpd_after, dir_after = _compute_dpd_dir_from_rates(rates)
-        prec, rec = _binary_pr(np.array(y, dtype=int), np.array(y_pred, dtype=int))
-        tpr_gap, fpr_gap = _compute_tpr_fpr_gaps(np.array(y, dtype=int), np.array(y_pred, dtype=int), sensitive)
-        return {
-            "method": "reweighing",
-            "method_type": "pre-processing",
-            "accuracy": acc,
-            "precision": prec,
-            "recall": rec,
-            "dpd": dpd_after,
-            "dir": dir_after,
-            "tpr_gap": tpr_gap,
-            "fpr_gap": fpr_gap,
-            "adjusted_rates": rates,
-        }
-    except Exception as e:
-        return {"method": "reweighing", "error": str(e)}
-
-
-def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
+def run_mitigation(
+    df: pd.DataFrame,
+    computed: dict,
+    dataset_description: Optional[str] = None,
+) -> MitigationSummary:
     """
     Scenario-aware mitigation suite:
     - Reweighing (pre-processing)
@@ -1237,14 +1186,12 @@ def run_mitigation(df: pd.DataFrame, computed: dict) -> MitigationSummary:
         "reject_option_classification":  0.91,
     }
 
-    selected_method, selection_reason, selection_context = _scenario_aware_method_selection(df, computed)
-
-    rw_primary = _real_method_aif360_reweighing(df, computed)
-    if rw_primary.get("error") == "aif360 not available":
-        rw_primary = _method_reweighing(df, computed)
+    selected_method, selection_reason, selection_context = _scenario_aware_method_selection(
+        df, computed, dataset_description
+    )
 
     raw_results = [
-        rw_primary,
+        _method_reweighing(df, computed),
         _method_disparate_impact_remover(df, computed),
         _method_threshold_optimisation(df, computed),
         _method_reject_option_classification(df, computed),
@@ -1812,7 +1759,7 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
 
     root_causes      = generate_root_causes(stats)
     bias_origin_dict = detect_bias_origin(stats)
-    mitigation       = run_mitigation(df, c)
+    mitigation       = run_mitigation(df, c, dataset_description=request.description)
     prompt           = build_prompt(stats, root_causes, reliability_dict)
     try:
         ai = await call_gemini(prompt)
