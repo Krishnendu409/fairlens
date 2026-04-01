@@ -52,6 +52,13 @@ function MetricCard({ metric, plainLang }) {
   )
 }
 
+function toCompactSentence(text, maxLen = 180) {
+  if (!text) return ''
+  const first = String(text).split('. ')[0]?.trim() || ''
+  if (first.length <= maxLen) return first.endsWith('.') ? first : `${first}.`
+  return `${first.slice(0, maxLen).trim()}…`
+}
+
 // ── Chat Panel ────────────────────────────────────────────────────────────────
 function ChatPanel({ datasetDescription, auditSummary }) {
   const [messages, setMessages] = useState([{
@@ -931,9 +938,30 @@ export default function AuditResultsPage() {
 
             <h3 className={styles.subTitle}>Key Metrics</h3>
             <div className={styles.metricsGrid}>
-              {metrics.filter(m => ['demographic_parity_difference', 'disparate_impact_ratio'].includes(m.key)).map(m => (
+              {[
+                ...metrics.filter(m => ['demographic_parity_difference', 'disparate_impact_ratio'].includes(m.key)),
+                ...(statistical_test ? [{
+                  name: 'Chi-square Statistic (χ²)',
+                  key: 'chi_square_statistic',
+                  value: statistical_test.statistic ?? 0,
+                  threshold: null,
+                  threshold_direction: 'below',
+                  flagged: Boolean(statistical_test.is_significant),
+                  interpretation: `p-value=${(statistical_test.p_value ?? 1).toFixed(6)} · ${statistical_test.is_significant ? 'Significant association detected.' : 'No significant association detected.'}`,
+                }] : []),
+              ].map(m => (
                 <MetricCard key={m.key} metric={m} plainLang={plain_language[m.key]}/>
               ))}
+            </div>
+
+            <div className={styles.card}>
+              <h3 className={styles.cardTitle}>Methods & Research Basis</h3>
+              <ul className={styles.causeList}>
+                <li className={styles.causeItem}><span className={styles.causeDot}/>DPD and DIR are computed from observed per-group selection rates used in fairness literature and compliance practice.</li>
+                <li className={styles.causeItem}><span className={styles.causeDot}/>Chi-square and p-value are computed with scipy&apos;s Pearson chi-square test of independence on the sensitive×target contingency table.</li>
+                <li className={styles.causeItem}><span className={styles.causeDot}/>Effect size is reported with Cramér&apos;s V, a standard association-strength statistic for categorical variables.</li>
+                <li className={styles.causeItem}><span className={styles.causeDot}/>Narrative text may be AI-assisted, but numeric metrics and flags come from deterministic backend computation.</li>
+              </ul>
             </div>
 
             <div className={styles.nextStepRow}>
@@ -1148,7 +1176,7 @@ export default function AuditResultsPage() {
             <p className={styles.tabSubtitle}>
               Four scenario-aware mitigation strategies evaluated automatically.
               Ranked by: <strong>0.4 × DPD_reduction + 0.4 × est_accuracy + 0.2 × rate_stability</strong> (confidence-discounted).
-              Results are measured from executed or simulated interventions on this dataset.
+              Scores are computed from dataset statistics and model outputs (Python/scikit-learn/scipy); AI generates explanation text only.
             </p>
 
             {!mitigation ? (
@@ -1157,7 +1185,7 @@ export default function AuditResultsPage() {
               <>
                 <div className={styles.projectionNotice}>
                   <Icon name="insights" size={14}/>
-                  <span>Mitigation outcomes shown below come from scenario-aware method runs (reweighing, disparate impact remover, threshold optimization, reject option classification) on the current audit dataset.</span>
+                  <span>Mitigation outcomes are computed from scenario-aware runs on this dataset (reweighing, disparate impact remover, threshold optimization, reject option classification), not pseudo-calculations.</span>
                 </div>
 
                 {/* Banner */}
@@ -1175,9 +1203,9 @@ export default function AuditResultsPage() {
                   </div>
                   <div className={styles.simBannerImprovement}>
                     <span className={styles.simBannerImpLabel}>Best Method: {mitigation.best_method.split('_').map(w=>w[0].toUpperCase()+w.slice(1)).join(' ')}</span>
-                    <span className={styles.simBannerImpVal}>{mitigation.trade_off_summary}</span>
+                    <span className={styles.simBannerImpHeadline}>{toCompactSentence(mitigation.trade_off_summary, 190)}</span>
                     {mitigation.selection_reason && (
-                      <span className={styles.simBannerImpVal}>{mitigation.selection_reason}</span>
+                      <span className={styles.simBannerImpDetail}><strong>Why selected:</strong> {toCompactSentence(mitigation.selection_reason, 175)}</span>
                     )}
                   </div>
                 </div>
@@ -1319,7 +1347,9 @@ export default function AuditResultsPage() {
               Select any real record and change its <strong>{sensitive_column}</strong> value to see how that individual's statistical outcome likelihood would change —
               a direct implementation of GDPR Art. 22 counterfactual explanation rights confirmed by CJEU C-203/22.
             </p>
-            <CounterfactualEditor sampleRows={sample_rows} sensitiveCol={sensitive_column} groupRatesMap={group_rates_map} allNumericGaps={all_numeric_gaps} />
+            <div className={styles.whatIfStack}>
+              <CounterfactualEditor sampleRows={sample_rows} sensitiveCol={sensitive_column} groupRatesMap={group_rates_map} allNumericGaps={all_numeric_gaps} />
+            </div>
           </div>
         )}
 
