@@ -54,6 +54,17 @@ function s(v) {
 }
 function pct(v, digits=1) { return v != null ? `${(v*100).toFixed(digits)}%` : 'N/A' }
 function num(v, digits=4)  { return v != null ? Number(v).toFixed(digits) : 'N/A' }
+function valueOr(v, fallback = 'NOT PROVIDED') {
+  const text = s(v).trim()
+  return text ? text : fallback
+}
+function listOr(v, fallback = 'NOT PROVIDED') {
+  if (Array.isArray(v)) {
+    const cleaned = v.map(x => valueOr(x, '')).filter(Boolean)
+    return cleaned.length ? cleaned.join(', ') : fallback
+  }
+  return valueOr(v, fallback)
+}
 
 // ── Compliance normaliser ─────────────────────────────────────────────────────
 function norm(meta) {
@@ -61,6 +72,13 @@ function norm(meta) {
     lawful_basis:null,dpia_status:null,dpia_link:null,dpo_contact:null,
     oversight_contact:null,nca_jurisdiction:null,monitoring_cadence:null,
     escalation_plan:null,annex_confirmation:null,countersignatures:[],
+    dataset_name:null,dataset_version:null,data_source:null,collection_method:null,
+    labeling_method:null,preprocessing_steps:null,known_biases:null,
+    purpose_of_processing:null,data_categories:null,retention_period:null,dsar_process:null,
+    dataset_origin:null,representativeness_explanation:null,bias_sources:null,
+    intended_use:null,intended_users:null,system_limitations:null,known_failure_modes:null,
+    log_retention_policy:null,log_storage_location:null,monitoring_frequency:null,alert_channel:null,
+    security_assessment_status:null,
     robustness_validation:{status:'not_documented',per_group:[],
       ood_testing:{status:'not_documented'},adversarial_testing:{status:'not_documented'}},
   }
@@ -81,9 +99,9 @@ function norm(meta) {
 function statusLabel(status, autoValue) {
   if (autoValue)                      return `AUTO-COMPUTED: ${s(autoValue)}`
   if (status === 'validated')         return 'VALIDATED'
-  if (status === 'pending_validation')return 'PENDING VALIDATION'
-  if (status === 'not_documented')    return 'PENDING OPERATOR ACTION'
-  return s(status || 'PENDING OPERATOR ACTION')
+  if (status === 'pending_validation')return 'DECLARED BUT NOT VERIFIED'
+  if (status === 'not_documented')    return 'REQUIRES INPUT'
+  return s(status || 'REQUIRES INPUT')
 }
 function statusColor(status, hasAuto) {
   if (hasAuto) return C.blue
@@ -121,6 +139,39 @@ function getEURisk(score) {
   if (score < 45) return {label:'Moderate Bias',euClass:'Limited-Risk System',color:C.amber}
   if (score < 70) return {label:'High Bias',euClass:'High-Risk AI System',color:C.red}
   return {label:'Critical Bias',euClass:'Potentially Prohibited System',color:C.red}
+}
+function computeAuditReadiness(compliance, result) {
+  const groups = {
+    dataGovernance: [
+      compliance.dataset_name, compliance.dataset_version, compliance.data_source, compliance.collection_method,
+      compliance.labeling_method, compliance.preprocessing_steps, compliance.known_biases,
+      compliance.dataset_origin, compliance.representativeness_explanation, compliance.bias_sources,
+    ],
+    gdpr: [
+      compliance.lawful_basis, compliance.purpose_of_processing, compliance.data_categories,
+      compliance.retention_period, compliance.dpia_status, compliance.dsar_process,
+    ],
+    riskMgmt: [
+      compliance.oversight_contact, compliance.security_assessment_status, compliance.monitoring_frequency,
+      compliance.escalation_plan, compliance.log_retention_policy, compliance.alert_channel,
+    ],
+  }
+  const pctScore = (vals) => Math.round((vals.filter(v => valueOr(v) !== 'NOT PROVIDED').length / vals.length) * 100)
+  const dg = pctScore(groups.dataGovernance)
+  const gdpr = pctScore(groups.gdpr)
+  const rm = pctScore(groups.riskMgmt)
+  const biasPenalty = Math.min(25, Math.max(0, Math.round((Number(result?.bias_score || 0) - 20) / 3)))
+  const overall = Math.max(0, Math.round(((dg + gdpr + rm) / 3) - biasPenalty))
+  return { dataGovernance: dg, gdpr, riskMgmt: rm, overall }
+}
+function criticalGaps(compliance) {
+  return [
+    { label: 'DPIA missing', missing: valueOr(compliance.dpia_status) === 'NOT PROVIDED' },
+    { label: 'Lawful basis missing', missing: valueOr(compliance.lawful_basis) === 'NOT PROVIDED' },
+    { label: 'Dataset provenance missing', missing: valueOr(compliance.data_source) === 'NOT PROVIDED' },
+    { label: 'Human oversight not defined', missing: valueOr(compliance.oversight_contact) === 'NOT PROVIDED' },
+    { label: 'Security assessment missing', missing: valueOr(compliance.security_assessment_status) === 'NOT PROVIDED' },
+  ]
 }
 
 function generateHash(str) {
@@ -337,7 +388,10 @@ function alertBox(doc, title, body, y, color, height) {
 // ════════════════════════════════════════════════════════════════════════════
 // MAIN EXPORT
 // ════════════════════════════════════════════════════════════════════════════
-export async function exportAuditToPdf(result, description) {
+export async function exportAuditToPdf(result, description, options = {}) {
+  if (!result || typeof result !== 'object') {
+    throw new Error('Invalid audit result payload')
+  }
   const doc  = new jsPDF({unit:'mm',format:'a4'})
   const now  = new Date()
   const ts   = now.toISOString().replace('T',' ').slice(0,19)+' UTC'
@@ -360,6 +414,8 @@ export async function exportAuditToPdf(result, description) {
     recordId = snap?.record_id||null
     hashValid = !!snap?.hash_valid
   } catch {}
+  const readiness = computeAuditReadiness(compliance, result)
+  const gaps = criticalGaps(compliance)
 
   // ── Metrics convenience ─────────────────────────────────────────────────────
   const dpd  = result.metrics?.find(m=>m.key==='demographic_parity_difference')?.value??0
@@ -397,7 +453,8 @@ export async function exportAuditToPdf(result, description) {
   cy = kv(doc, 'ANALYSIS MODE', hasPred?'Model-Based (prediction column present)':'Label-Only (outcome labels only)', cy)
   cy = kv(doc, 'COMPLIANCE RECORD ID', recordId||'Offline export — no server record', cy, recordId?C.text:C.amber)
   cy = kv(doc, 'INTEGRITY HASH (EXPORT)', exportHash, cy, hashValid?C.green:C.muted)
-  cy = kv(doc, 'COMPLIANCE AUDITOR', 'FairLens Automated Audit System v4.0', cy)
+  cy = kv(doc, 'COMPLIANCE AUDITOR', 'FairLens automated analytical report system v4.0', cy)
+  cy = kv(doc, 'REPORT TYPE', 'This is an automated analytical report', cy, C.amber)
   cy = kv(doc, 'METHODOLOGY', METHODOLOGY_VERSION, cy)
 
   // ── Scope statement (Annex IV §1) ─────────────────────────────────────
@@ -408,6 +465,23 @@ export async function exportAuditToPdf(result, description) {
   doc.text('ANNEX IV §1 — GENERAL SYSTEM DESCRIPTION', M+4, cy+6)
   cy = textBlock(doc, buildSystemDescription(result, description), M+4, cy+10, {maxW:CW-8, fs:8.5, lh:1.5, color:C.text, mb:0})
   cy += 8
+
+  cy = subHead(doc, 'CRITICAL COMPLIANCE GAPS', cy)
+  const gapRows = gaps.map(g => ([
+    { text: g.missing ? '⚠' : '✓', color: g.missing ? C.red : C.green, bold: true },
+    { text: g.label, bold: true },
+    { text: g.missing ? 'REQUIRES INPUT' : 'DECLARED BUT NOT VERIFIED', color: g.missing ? C.red : C.amber },
+  ]))
+  cy = table(doc, ['Indicator','Gap','Status'], gapRows, cy, [16,94,60])
+
+  cy = subHead(doc, 'AUDIT READINESS SCORE (AUTO)', cy)
+  const scoreRows = [
+    [{ text: 'Data Governance %', bold: true }, { text: `${readiness.dataGovernance}%`, color: readiness.dataGovernance >= 70 ? C.green : C.red }],
+    [{ text: 'GDPR %', bold: true }, { text: `${readiness.gdpr}%`, color: readiness.gdpr >= 70 ? C.green : C.red }],
+    [{ text: 'Risk Mgmt %', bold: true }, { text: `${readiness.riskMgmt}%`, color: readiness.riskMgmt >= 70 ? C.green : C.red }],
+    [{ text: 'Overall Score', bold: true }, { text: `${readiness.overall}%`, color: readiness.overall >= 70 ? C.green : C.red, bold: true }],
+  ]
+  cy = table(doc, ['Dimension','Score'], scoreRows, cy, [120,50])
 
   cy = gauge(doc, result.bias_score??0, risk, cy)
 
@@ -443,11 +517,32 @@ export async function exportAuditToPdf(result, description) {
   ]
   y = table(doc, ['Data Quality Criterion','Auto-Assessment','Legal Basis'], dataQualRows, y, [70,55,45])
 
+  y = subHead(doc, 'Declared Dataset Credibility (Structured)', y)
+  const datasetCredRows = [
+    [{text:'dataset_name'},{text:valueOr(compliance.dataset_name),color:valueOr(compliance.dataset_name)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'dataset_version'},{text:valueOr(compliance.dataset_version),color:valueOr(compliance.dataset_version)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'data_source'},{text:valueOr(compliance.data_source),color:valueOr(compliance.data_source)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'collection_method'},{text:valueOr(compliance.collection_method),color:valueOr(compliance.collection_method)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'labeling_method'},{text:valueOr(compliance.labeling_method),color:valueOr(compliance.labeling_method)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'preprocessing_steps'},{text:valueOr(compliance.preprocessing_steps),color:valueOr(compliance.preprocessing_steps)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'known_biases'},{text:valueOr(compliance.known_biases),color:valueOr(compliance.known_biases)==='NOT PROVIDED'?C.red:C.text}],
+  ]
+  y = table(doc, ['Field','Value'], datasetCredRows, y, [65,105])
+
+  y = subHead(doc, 'Data Governance Improvement (Art. 10) — AUTO + DECLARED DATA', y)
+  const art10Rows = [
+    [{text:'dataset origin'},{text:valueOr(compliance.dataset_origin),color:valueOr(compliance.dataset_origin)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'representativeness explanation'},{text:valueOr(compliance.representativeness_explanation),color:valueOr(compliance.representativeness_explanation)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'bias sources'},{text:valueOr(compliance.bias_sources),color:valueOr(compliance.bias_sources)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'auto-computed metric summary'},{text:`Groups: ${gStats.length}, DPD: ${num(dpd)}, DIR: ${num(dir)}`,color:C.blue}],
+  ]
+  y = table(doc, ['Signal','Content'], art10Rows, y, [65,105])
+
   if (gStats.length>0) {
     y = subHead(doc, 'Demographic Outcome Distribution (Art. 10 — Pass Rate by Group)', y)
     y = barChart(doc, gStats.map(g=>({group:s(g.group),pass_rate:g.pass_rate||0})), 'group', 'pass_rate', M+15, y, CW-30, 48)
     if (gStats.length>1 && bestG && worstG) {
-      const insight = `AUTO-ANALYSIS: "${s(bestG.group)}" has the highest selection rate (${pct(bestG.pass_rate)}). "${s(worstG.group)}" is most disadvantaged at ${pct(worstG.pass_rate)} — a disparity of ${pct(bestG.pass_rate-worstG.pass_rate)}. This ${(bestG.pass_rate-worstG.pass_rate)>0.1?'EXCEEDS':'is within'} the EU Article 10 threshold for intervention.`
+      const insight = `AUTO-ANALYSIS: "${s(bestG.group)}" has the highest selection rate (${pct(bestG.pass_rate)}). "${s(worstG.group)}" is most disadvantaged at ${pct(worstG.pass_rate)} — a disparity of ${pct(bestG.pass_rate-worstG.pass_rate)}. This ${(bestG.pass_rate-worstG.pass_rate)>0.1?'EXCEEDS':'is within'} the commonly accepted fairness threshold for intervention.`
       y = alertBox(doc, 'CHART AUTO-ANALYSIS (Art. 10 — Data Governance)', insight, y, C.primary, 22)
     }
 
@@ -800,8 +895,8 @@ export async function exportAuditToPdf(result, description) {
     [{text:'Precision / Recall / F1 by group'},{text:hasPerGroup?`AUTO-COMPUTED — F1 available for ${rob.per_group.filter(p=>p.f1!=null).length} groups`:hasPred?'COMPUTABLE':'NOT AVAILABLE',color:hasPerGroup?C.blue:hasPred?C.amber:C.muted},{text:'Required for equalized odds assessment — Technical Lead validation required'}],
     [{text:'Out-of-distribution (OOD) testing'},{text:statusLabel(rob.ood_testing?.status)},{text:'Test model performance outside training distribution — Art. 15(4): resilience to errors'}],
     [{text:'Adversarial robustness assessment'},{text:statusLabel(rob.adversarial_testing?.status)},{text:'Data poisoning / model extraction / adversarial input testing — Art. 15(5)'}],
-    [{text:'Cybersecurity vulnerability assessment'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Art. 15(5): Protect against attacks exploiting system vulnerabilities'}],
-    [{text:'Model version & change management log (Art. 11(1)(j))'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Retain versioned technical file for 10 years post-deployment (Art. 18)'}],
+    [{text:'Cybersecurity vulnerability assessment'},{text:valueOr(compliance.security_assessment_status)==='NOT PROVIDED'?'REQUIRES INPUT':'DECLARED BUT NOT VERIFIED',color:valueOr(compliance.security_assessment_status)==='NOT PROVIDED'?C.red:C.amber},{text:'Art. 15(5): Protect against attacks exploiting system vulnerabilities'}],
+    [{text:'Model version & change management log (Art. 11(1)(j))'},{text:'REQUIRES INPUT',color:C.amber},{text:'Retain versioned technical file for 10 years post-deployment (Art. 18)'}],
   ]
   y = table(doc, ['Requirement','Status','Action Required'], robRows, y, [72,38,60])
 
@@ -829,33 +924,48 @@ export async function exportAuditToPdf(result, description) {
   y = subHead(doc, 'DPIA Trigger Assessment (GDPR Art. 35)', y)
   const hasSens = !!result.sensitive_column
   const largeDS = (result.total_rows||0)>1000
-  const dpiaS = compliance.dpia_status
+  const dpiaS = valueOr(compliance.dpia_status)
   const dpiaRows = [
     [{text:'Systematic processing of special category data'},{text:hasSens?'TRIGGERED — Art. 35(3)(b)':'REVIEW REQUIRED',color:hasSens?C.red:C.amber,bold:true},{text:`Processing "${s(result.sensitive_column)}" for automated selection constitutes systematic evaluation under Art. 35(1)`}],
     [{text:'Automated decision with legal/similarly significant effect'},{text:'TRIGGERED — Art. 35(3)(a)',color:C.red,bold:true},{text:'Automated selection decisions significantly affect individuals — GDPR Art. 22 applies'}],
     [{text:'Large-scale processing'},{text:largeDS?'TRIGGERED — Art. 35(1)':'REVIEW REQUIRED',color:largeDS?C.red:C.amber},{text:`${(result.total_rows||0).toLocaleString()} records. EDPB guidelines: large-scale = many individuals / large geographic area / long duration`}],
     [{text:'New technology with high residual risk'},{text:'LIKELY TRIGGERED — Art. 35(1)',color:C.red},{text:'Automated AI selection using protected attributes constitutes new technology per EDPB guidelines'}],
-    [{text:'DPIA conducted and documented'},{text:dpiaS?`DOCUMENTED: ${s(dpiaS)}`:hasSens?'PENDING OPERATOR ACTION':'PENDING OPERATOR ACTION',color:dpiaS?C.green:C.red,bold:true},{text:dpiaS?`Status recorded${compliance.dpia_link?` — link: ${s(compliance.dpia_link)}`:''}. DPO sign-off required if triggered.`:'CRITICAL: Conduct DPIA before deployment; involve DPO; document findings'}],
+    [{text:'DPIA conducted and documented'},{text:dpiaS!=='NOT PROVIDED'?`DECLARED: ${s(dpiaS)}`:'REQUIRES INPUT',color:dpiaS!=='NOT PROVIDED'?C.amber:C.red,bold:true},{text:dpiaS!=='NOT PROVIDED'?`Status recorded${compliance.dpia_link?` — link: ${s(compliance.dpia_link)}`:''}. DPO sign-off required if triggered.`:'CRITICAL: Conduct DPIA before deployment; involve DPO; document findings'}],
   ]
   y = table(doc, ['DPIA Criterion','Status','Assessment / Action'], dpiaRows, y, [68,32,70])
 
+  y = subHead(doc, 'GDPR Core Structure (Mandatory)', y)
+  const lBasis = valueOr(compliance.lawful_basis)
+  const purpose = valueOr(compliance.purpose_of_processing)
+  const categories = listOr(compliance.data_categories)
+  const retention = valueOr(compliance.retention_period)
+  const dsar = valueOr(compliance.dsar_process)
+  const dpoC = valueOr(compliance.dpo_contact)
+  const ovC = valueOr(compliance.oversight_contact)
+  const gdprCoreRows = [
+    [{text:'lawful_basis'},{text:lBasis,color:lBasis==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'purpose_of_processing'},{text:purpose,color:purpose==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'data_categories'},{text:categories,color:categories==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'retention_period'},{text:retention,color:retention==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'dpia_status'},{text:dpiaS,color:dpiaS==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'dsar_process'},{text:dsar,color:dsar==='NOT PROVIDED'?C.red:C.text}],
+  ]
+  y = table(doc, ['Field','Value'], gdprCoreRows, y, [65,105])
+
   y = subHead(doc, 'GDPR Individual Rights Obligations (Arts. 13-22)', y)
-  const lBasis = compliance.lawful_basis
-  const dpoC = compliance.dpo_contact
-  const ovC = compliance.oversight_contact
   const gdprRows = [
-    [{text:'Lawful basis for processing (Art. 6)'},{text:lBasis?`DOCUMENTED: ${s(lBasis)}`:'PENDING OPERATOR ACTION',color:lBasis?C.green:C.red},{text:lBasis||'Identify legal basis: consent (Art. 6(1)(a)), contract (6(1)(b)), legal obligation (6(1)(c)), legitimate interest (6(1)(f))'}],
-    [{text:'Transparency notice to data subjects (Arts. 13-14)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Provide notice before or at time of collection: purposes, legal basis, retention, rights, automated decision-making'}],
-    [{text:'Right of access to personal data (Art. 15)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Implement mechanism for data subject access requests (DSARs); respond within 30 days'}],
-    [{text:'Right to rectification (Art. 16)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Process to correct inaccurate personal data used in automated selection decisions'}],
-    [{text:'Right to erasure / right to be forgotten (Art. 17)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Define deletion schedule; implement deletion requests; document retention justification'}],
-    [{text:'Right to object to automated processing (Art. 21)'},{text:ovC?`CONTACT RECORDED: ${s(ovC)}`:'PENDING OPERATOR ACTION',color:ovC?C.amber:C.red},{text:ovC?`Contact documented. Response SLA must be defined.`:'Document objection contact point and response SLA; automated processing must be stoppable on objection'}],
-    [{text:'Right not to be subject to solely automated decisions (Art. 22)'},{text:ovC?`HUMAN REVIEWER: ${s(ovC)}`:'PENDING OPERATOR ACTION',color:ovC?C.amber:C.red},{text:ovC?`Named human reviewer recorded. Escalation path must be documented.`:'Name human reviewer and document escalation path; individuals must be able to request human review'}],
+    [{text:'Lawful basis for processing (Art. 6)'},{text:lBasis!=='NOT PROVIDED'?`DECLARED: ${s(lBasis)}`:'REQUIRES INPUT',color:lBasis!=='NOT PROVIDED'?C.amber:C.red},{text:lBasis!=='NOT PROVIDED'?s(lBasis):'Identify legal basis: consent (Art. 6(1)(a)), contract (6(1)(b)), legal obligation (6(1)(c)), legitimate interest (6(1)(f))'}],
+    [{text:'Transparency notice to data subjects (Arts. 13-14)'},{text:'REQUIRES INPUT',color:C.amber},{text:'Provide notice before or at time of collection: purposes, legal basis, retention, rights, automated decision-making'}],
+    [{text:'Right of access to personal data (Art. 15)'},{text:dsar!=='NOT PROVIDED'?'DECLARED BUT NOT VERIFIED':'REQUIRES INPUT',color:dsar!=='NOT PROVIDED'?C.amber:C.red},{text:dsar!=='NOT PROVIDED'?dsar:'Implement mechanism for data subject access requests (DSARs); respond within 30 days'}],
+    [{text:'Right to rectification (Art. 16)'},{text:'REQUIRES INPUT',color:C.amber},{text:'Process to correct inaccurate personal data used in automated selection decisions'}],
+    [{text:'Right to erasure / right to be forgotten (Art. 17)'},{text:retention!=='NOT PROVIDED'?'DECLARED BUT NOT VERIFIED':'REQUIRES INPUT',color:retention!=='NOT PROVIDED'?C.amber:C.red},{text:retention!=='NOT PROVIDED'?retention:'Define deletion schedule; implement deletion requests; document retention justification'}],
+    [{text:'Right to object to automated processing (Art. 21)'},{text:ovC!=='NOT PROVIDED'?`DECLARED: ${s(ovC)}`:'REQUIRES INPUT',color:ovC!=='NOT PROVIDED'?C.amber:C.red},{text:ovC!=='NOT PROVIDED'?`Contact documented. Response SLA must be defined.`:'Document objection contact point and response SLA; automated processing must be stoppable on objection'}],
+    [{text:'Right not to be subject to solely automated decisions (Art. 22)'},{text:ovC!=='NOT PROVIDED'?`DECLARED: ${s(ovC)}`:'REQUIRES INPUT',color:ovC!=='NOT PROVIDED'?C.amber:C.red},{text:ovC!=='NOT PROVIDED'?`Named human reviewer recorded. Escalation path must be documented.`:'Name human reviewer and document escalation path; individuals must be able to request human review'}],
     [{text:'Right to counterfactual explanation (CJEU C-203/22)'},{text:'AUTO-PROVIDED',color:C.blue},{text:'FairLens What-If tool implements counterfactual explanations per CJEU C-203/22 standard; available on request'}],
-    [{text:'Data retention and deletion schedule (Art. 5(1)(e))'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Define retention period; document deletion triggers; anonymise or delete when no longer necessary'}],
-    [{text:'Third-party processor agreements (Art. 28)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'If AI model hosted externally: Data Processing Agreement (DPA) required with processor'}],
-    [{text:'DPO consultation on DPIA (Art. 36)'},{text:dpoC?`DPO RECORDED: ${s(dpoC)}`:'PENDING OPERATOR ACTION',color:dpoC?C.amber:C.red},{text:dpoC?`DPO contact documented. Formal DPIA sign-off required.`:'Appoint or consult DPO; mandatory when DPIA is triggered; seek prior consultation if high residual risk (Art. 36)'}],
-    [{text:'Special category data safeguards (Art. 9 GDPR + Art. 10(5) AI Act)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Processing protected attributes for bias detection permitted under AI Act Art. 10(5) — document safeguards applied'}],
+    [{text:'Data retention and deletion schedule (Art. 5(1)(e))'},{text:retention!=='NOT PROVIDED'?'DECLARED BUT NOT VERIFIED':'REQUIRES INPUT',color:retention!=='NOT PROVIDED'?C.amber:C.red},{text:retention!=='NOT PROVIDED'?retention:'Define retention period; document deletion triggers; anonymise or delete when no longer necessary'}],
+    [{text:'Third-party processor agreements (Art. 28)'},{text:'REQUIRES INPUT',color:C.amber},{text:'If AI model hosted externally: Data Processing Agreement (DPA) required with processor'}],
+    [{text:'DPO consultation on DPIA (Art. 36)'},{text:dpoC!=='NOT PROVIDED'?`DECLARED: ${s(dpoC)}`:'REQUIRES INPUT',color:dpoC!=='NOT PROVIDED'?C.amber:C.red},{text:dpoC!=='NOT PROVIDED'?`DPO contact documented. Formal DPIA sign-off required.`:'Appoint or consult DPO; mandatory when DPIA is triggered; seek prior consultation if high residual risk (Art. 36)'}],
+    [{text:'Special category data safeguards (Art. 9 GDPR + Art. 10(5) AI Act)'},{text:'REQUIRES INPUT',color:C.amber},{text:'Processing protected attributes for bias detection permitted under AI Act Art. 10(5) — document safeguards applied'}],
   ]
   y = table(doc, ['GDPR Obligation','Status','Action Required'], gdprRows, y, [65,32,73])
 
@@ -872,25 +982,34 @@ export async function exportAuditToPdf(result, description) {
   const escP = compliance.escalation_plan
   const ncaJ = compliance.nca_jurisdiction
 
+  y = subHead(doc, 'Declared monitoring setup (standalone system)', y)
+  const declaredMonRows = [
+    [{text:'log_retention_policy'},{text:valueOr(compliance.log_retention_policy),color:valueOr(compliance.log_retention_policy)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'log_storage_location'},{text:valueOr(compliance.log_storage_location),color:valueOr(compliance.log_storage_location)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'monitoring_frequency'},{text:valueOr(compliance.monitoring_frequency),color:valueOr(compliance.monitoring_frequency)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'alert_channel'},{text:valueOr(compliance.alert_channel),color:valueOr(compliance.alert_channel)==='NOT PROVIDED'?C.red:C.text}],
+  ]
+  y = table(doc, ['Field','Value'], declaredMonRows, y, [65,105])
+
   y = subHead(doc, 'Monitoring Plan (Annex IV §9 — Art. 72)', y)
   const monRows = [
-    [{text:'Bias re-audit cadence (Art. 72)'},{text:monC?`DOCUMENTED: ${s(monC)}`:'PENDING OPERATOR ACTION',color:monC?C.green:C.amber},{text:monC||'Recommended: quarterly, or triggered by every 10% change in dataset size or composition'}],
+    [{text:'Bias re-audit cadence (Art. 72)'},{text:monC?`DECLARED: ${s(monC)}`:'REQUIRES INPUT',color:monC?C.amber:C.red},{text:monC||'Recommended: quarterly, or triggered by every 10% change in dataset size or composition'}],
     [{text:'DPD drift alert threshold'},{text:`AUTO-COMPUTED: Alert at DPD > ${(currentDPD*1.20).toFixed(4)}`,color:C.blue},{text:`Current DPD: ${num(currentDPD,4)}. Alert threshold set at 20% above current (EU best practice).`}],
     [{text:'DIR drift alert threshold'},{text:'AUTO-COMPUTED: Alert if DIR < 0.80',color:C.blue},{text:`Current DIR: ${num(dir,4)||'N/A'}. EU 4/5 rule requires DIR ≥ 0.80. Alert triggered below this threshold.`}],
     [{text:'Bias score escalation threshold'},{text:`AUTO-COMPUTED: Alert if score > ${Math.min(100,Math.round((result.bias_score||0)*1.15))}`,color:C.blue},{text:`Current score: ${result.bias_score}/100. Escalation if score increases >15% from baseline.`}],
-    [{text:'New protected group detection'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Define protocol to detect new demographic groups in production data; trigger re-audit when new groups appear'}],
-    [{text:'Escalation procedure (Art. 72(3))'},{text:escP?`DOCUMENTED: ${s(escP)}`:'PENDING OPERATOR ACTION',color:escP?C.green:C.amber},{text:escP||'Define: notification chain, responsible persons, timelines, corrective action triggers'}],
+    [{text:'New protected group detection'},{text:'REQUIRES INPUT',color:C.amber},{text:'Define protocol to detect new demographic groups in production data; trigger re-audit when new groups appear'}],
+    [{text:'Escalation procedure (Art. 72(3))'},{text:escP?`DECLARED: ${s(escP)}`:'REQUIRES INPUT',color:escP?C.amber:C.red},{text:escP||'Define: notification chain, responsible persons, timelines, corrective action triggers'}],
     [{text:'Technical documentation retention (Art. 18)'},{text:'MANDATORY — 10 YEAR RETENTION',color:C.red},{text:'Retain full technical file for minimum 10 years after market placement or service commencement'}],
-    [{text:'Automatically generated logs (Art. 19)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'System must log sufficient data to identify risks and trace decisions — Art. 19 + Art. 12'}],
+    [{text:'Automatically generated logs (Art. 19)'},{text:valueOr(compliance.log_storage_location)==='NOT PROVIDED'?'REQUIRES INPUT':'DECLARED BUT NOT VERIFIED',color:valueOr(compliance.log_storage_location)==='NOT PROVIDED'?C.red:C.amber},{text:'System must log sufficient data to identify risks and trace decisions — Art. 19 + Art. 12'}],
   ]
   y = table(doc, ['Monitoring Element','Status','Specification / Guidance'], monRows, y, [65,38,67])
 
   y = subHead(doc, 'Serious Incident Reporting (Art. 73)', y)
   const incRows = [
     [{text:'Serious incident definition documented'},{text:'MANDATORY',color:C.red},{text:'Art. 73: Any incident causing/risking harm to health, safety, or fundamental rights; bias causing adverse legal/employment effect qualifies'}],
-    [{text:'Named NCA liaison'},{text:ncaJ?`DOCUMENTED: ${s(ncaJ)}`:'PENDING OPERATOR ACTION',color:ncaJ?C.green:C.amber},{text:ncaJ?`NCA jurisdiction recorded. Assign named liaison and document contact details.`:'Assign named person responsible for NCA notifications; document contact details'}],
+    [{text:'Named NCA liaison'},{text:ncaJ?`DECLARED: ${s(ncaJ)}`:'REQUIRES INPUT',color:ncaJ?C.amber:C.red},{text:ncaJ?`NCA jurisdiction recorded. Assign named liaison and document contact details.`:'Assign named person responsible for NCA notifications; document contact details'}],
     [{text:'Reporting timeline (Art. 73(3))'},{text:'MANDATORY — 15 WORKING DAYS',color:C.red},{text:'Notify NCA within 15 working days of first becoming aware of a serious incident or malfunctioning'}],
-    [{text:'NCA jurisdiction documented'},{text:ncaJ?`DOCUMENTED: ${s(ncaJ)}`:'PENDING OPERATOR ACTION',color:ncaJ?C.green:C.red},{text:ncaJ||'Identify the EU Member State NCA with jurisdiction based on Art. 2 deployment scope'}],
+    [{text:'NCA jurisdiction documented'},{text:ncaJ?`DECLARED BUT NOT VERIFIED: ${s(ncaJ)}`:'REQUIRES INPUT',color:ncaJ?C.amber:C.red},{text:ncaJ||'Identify the EU Member State NCA with jurisdiction based on Art. 2 deployment scope'}],
     [{text:'Market surveillance cooperation (Art. 74)'},{text:'MANDATORY',color:C.red},{text:'Provide all requested information to NCA; allow access to technical documentation; cooperate with investigations'}],
   ]
   y = table(doc, ['Incident Reporting Element','Status','Requirements'], incRows, y, [65,35,70])
@@ -914,11 +1033,11 @@ export async function exportAuditToPdf(result, description) {
 
   y = subHead(doc, 'Quality Management System Requirements (Art. 17)', y)
   const qmsRows = [
-    [{text:'Art. 17(1)(a): Regulatory compliance strategy'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Document strategy for compliance with applicable AI Act requirements'}],
-    [{text:'Art. 17(1)(b): Design and development procedures'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Document design choices, architecture decisions, training procedures'}],
+    [{text:'Art. 17(1)(a): Regulatory compliance strategy'},{text:'REQUIRES INPUT',color:C.amber},{text:'Document strategy for compliance with applicable AI Act requirements'}],
+    [{text:'Art. 17(1)(b): Design and development procedures'},{text:'REQUIRES INPUT',color:C.amber},{text:'Document design choices, architecture decisions, training procedures'}],
     [{text:'Art. 17(1)(c): Examination, testing, validation procedures'},{text:'PARTIALLY DOCUMENTED',color:C.blue},{text:'FairLens audit provides fairness validation — technical accuracy testing by operator required'}],
-    [{text:'Art. 17(1)(d): Roles and responsibilities'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Name responsible persons for each compliance obligation (see Section 12)'}],
-    [{text:'Art. 17(1)(e-g): Resources, corrective actions, feedback'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Document resources, corrective action procedures, and feedback mechanisms'}],
+    [{text:'Art. 17(1)(d): Roles and responsibilities'},{text:'REQUIRES INPUT',color:C.amber},{text:'Name responsible persons for each compliance obligation (see Section 12)'}],
+    [{text:'Art. 17(1)(e-g): Resources, corrective actions, feedback'},{text:'REQUIRES INPUT',color:C.amber},{text:'Document resources, corrective action procedures, and feedback mechanisms'}],
     [{text:'Art. 17(2): QMS proportionality for SMEs'},{text:'AUTO-ASSESSED',color:C.blue},{text:'SMEs may implement a simplified QMS — Commission guidance to be published (Art. 17(4))'}],
   ]
   y = table(doc, ['QMS Requirement','Status','Action Required'], qmsRows, y, [68,32,70])
@@ -932,14 +1051,24 @@ export async function exportAuditToPdf(result, description) {
   y = textBlock(doc, 'Article 14 requires high-risk AI systems to be designed to allow natural persons to oversee their functioning and intervene. GDPR Article 22(3) requires that where automated decision-making is permitted, the data subject must have the right to obtain human intervention, express their view, and contest the decision.', M, y, {color:C.muted, lh:1.5, mb:8})
 
   const humanRows = [
-    [{text:'Human oversight mechanism documented (Art. 14(1))'},{text:ovC?`CONTACT: ${s(ovC)}`:'PENDING OPERATOR ACTION',color:ovC?C.amber:C.red},{text:ovC?'Contact documented. Full escalation path and response SLA required.':'Name responsible persons who can review, override, and intervene in automated decisions'}],
-    [{text:'Deployer training on oversight (Art. 14(3)(c))'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Train deployers to understand capabilities, limitations, and appropriate human oversight of this system'}],
-    [{text:'Override / suspension capability (Art. 14(4))'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'System must be stoppable and overridable by natural person without undue delay'}],
-    [{text:'Monitoring of system outputs (Art. 14(5))'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Define monitoring procedures; document escalation when anomalous outputs detected'}],
-    [{text:'Human review of contested decisions (GDPR Art. 22(3))'},{text:ovC?'CONTACT DOCUMENTED':'PENDING OPERATOR ACTION',color:ovC?C.amber:C.red},{text:'Individuals have the right to obtain human review; decision must be re-examined by natural person'}],
-    [{text:'Non-sole reliance on automated output (Art. 14(5)(b))'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Ensure human decision-makers are aware they must not rely solely on the AI system output'}],
+    [{text:'Human oversight mechanism documented (Art. 14(1))'},{text:ovC!=='NOT PROVIDED'?`DECLARED: ${s(ovC)}`:'REQUIRES INPUT',color:ovC!=='NOT PROVIDED'?C.amber:C.red},{text:ovC!=='NOT PROVIDED'?'Contact documented. Full escalation path and response SLA required.':'Name responsible persons who can review, override, and intervene in automated decisions'}],
+    [{text:'Deployer training on oversight (Art. 14(3)(c))'},{text:'REQUIRES INPUT',color:C.amber},{text:'Train deployers to understand capabilities, limitations, and appropriate human oversight of this system'}],
+    [{text:'Override / suspension capability (Art. 14(4))'},{text:'REQUIRES INPUT',color:C.amber},{text:'System must be stoppable and overridable by natural person without undue delay'}],
+    [{text:'Monitoring of system outputs (Art. 14(5))'},{text:'REQUIRES INPUT',color:C.amber},{text:'Define monitoring procedures; document escalation when anomalous outputs detected'}],
+    [{text:'Human review of contested decisions (GDPR Art. 22(3))'},{text:ovC!=='NOT PROVIDED'?'DECLARED BUT NOT VERIFIED':'REQUIRES INPUT',color:ovC!=='NOT PROVIDED'?C.amber:C.red},{text:'Individuals have the right to obtain human review; decision must be re-examined by natural person'}],
+    [{text:'Non-sole reliance on automated output (Art. 14(5)(b))'},{text:'REQUIRES INPUT',color:C.amber},{text:'Ensure human decision-makers are aware they must not rely solely on the AI system output'}],
   ]
   y = table(doc, ['Human Oversight Requirement','Status','Action Required'], humanRows, y, [70,35,65])
+
+  y = sectionHeader(doc, '11A', 'INTENDED USE & LIMITATIONS',
+    'Human-readable transparency declaration for deployers and affected persons', y)
+  const intendedRows = [
+    [{text:'intended_use'},{text:valueOr(compliance.intended_use),color:valueOr(compliance.intended_use)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'intended_users'},{text:valueOr(compliance.intended_users),color:valueOr(compliance.intended_users)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'system_limitations'},{text:valueOr(compliance.system_limitations),color:valueOr(compliance.system_limitations)==='NOT PROVIDED'?C.red:C.text}],
+    [{text:'known_failure_modes'},{text:valueOr(compliance.known_failure_modes),color:valueOr(compliance.known_failure_modes)==='NOT PROVIDED'?C.red:C.text}],
+  ]
+  y = table(doc, ['Field','Declaration'], intendedRows, y, [65,105])
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SECTION 12 — DECLARATION OF CONFORMITY (Art. 47 / Annex V)
@@ -968,12 +1097,12 @@ export async function exportAuditToPdf(result, description) {
   y = subHead(doc, 'Annex V Coverage — EU Declaration of Conformity Requirements', y)
   const annexVRows = [
     [{text:'System name and version (Annex V §1)'},{text:'AUTO-DOCUMENTED',color:C.blue},{text:'FairLens audit report methodology: '+METHODOLOGY_VERSION}],
-    [{text:'Provider name and address (Annex V §2)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Operator must add provider legal name, registered address, and contact details'}],
-    [{text:'Statement of sole responsibility (Annex V §3)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Provider must declare sole responsibility for compliance with Regulation (EU) 2024/1689'}],
-    [{text:'Conformity assessment procedure (Annex V §4)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'Reference the specific conformity assessment route used (Annex VI internal or Annex VII notified body)'}],
+    [{text:'Provider name and address (Annex V §2)'},{text:'REQUIRES INPUT',color:C.amber},{text:'Operator must add provider legal name, registered address, and contact details'}],
+    [{text:'Statement of sole responsibility (Annex V §3)'},{text:'REQUIRES INPUT',color:C.amber},{text:'Provider must declare sole responsibility for compliance with Regulation (EU) 2024/1689'}],
+    [{text:'Conformity assessment procedure (Annex V §4)'},{text:'REQUIRES INPUT',color:C.amber},{text:'Reference the specific conformity assessment route used (Annex VI internal or Annex VII notified body)'}],
     [{text:'Applied standards (Annex V §5)'},{text:'AUTO-DOCUMENTED',color:C.blue},{text:'See Section 10 — Standards and Specifications'}],
-    [{text:'Notified body involvement (Annex V §6)'},{text:'PENDING OPERATOR ACTION',color:C.amber},{text:'If applicable, provide name, address, and identification number of notified body'}],
-    [{text:'Authorised signatory (Annex V §7)'},{text:'PENDING OPERATOR ACTION',color:C.red},{text:'Provider must sign and date the EU Declaration of Conformity before market placement'}],
+    [{text:'Notified body involvement (Annex V §6)'},{text:'REQUIRES INPUT',color:C.amber},{text:'If applicable, provide name, address, and identification number of notified body'}],
+    [{text:'Authorised signatory (Annex V §7)'},{text:'REQUIRES INPUT',color:C.red},{text:'Provider must sign and date the EU Declaration of Conformity before market placement'}],
   ]
   y = table(doc, ['Annex V Requirement','Status','Action Required'], annexVRows, y, [65,32,73])
 
@@ -1010,50 +1139,12 @@ export async function exportAuditToPdf(result, description) {
   y = textBlock(doc, `Methodology: ${METHODOLOGY_VERSION}  |  Integrity Hash (export): ${exportHash}  |  Generated: ${ts}  |  Geographic deployment scope must be documented per Art. 2, Regulation (EU) 2024/1689.  |  Fines: up to EUR 30,000,000 or 6% global annual turnover (Art. 99).`, M, y, {color:C.muted, maxW:CW, fs:7, lh:1.4})
 
   footer(doc)
+  if (options.returnBlob) return doc.output('blob')
   doc.save(`FairLens_Compliance_Audit_${Date.now()}.pdf`)
 }
 
 export async function exportAuditToPdfBlob(result, description) {
-  const doc  = new jsPDF({unit:'mm',format:'a4'})
-  let y = M
-  const ts = new Date().toLocaleString()
-  const bias = n(result.bias_score)
-  const level = s(result.bias_level || '')
-  const risk = s(result.risk_label || '')
-  const summary = s(result.summary || '')
-  const findings = (result.key_findings || []).map(s).filter(Boolean)
-  const recs = (result.recommendations || []).map(s).filter(Boolean)
-  doc.setFillColor(...C.primary); doc.rect(0, 0, PW, 24, 'F')
-  doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.setFontSize(16)
-  doc.text('FairLens Compliance Audit Report', M, 14)
-  doc.setFont('helvetica','normal'); doc.setFontSize(9)
-  doc.text(`Generated: ${ts}`, PW-M, 14, {align:'right'})
-  y = 30
-  doc.setTextColor(...C.text)
-  doc.setFont('helvetica','bold'); doc.setFontSize(12)
-  doc.text('Overview', M, y); y += 7
-  doc.setFont('helvetica','normal'); doc.setFontSize(10)
-  y = textBlock(doc, `Bias: ${bias} (${level}) | Risk: ${risk}`, M, y, { maxW: CW, fs: 10, lh: 1.45, mb: 4 })
-  if (summary) {
-    y = textBlock(doc, summary, M, y, { maxW: CW, fs: 9.5, lh: 1.45, mb: 4 })
-  }
-  y = checkPage(doc, y, 10)
-  doc.setFont('helvetica','bold'); doc.text('Key Findings', M, y); y += 6
-  doc.setFont('helvetica','normal')
-  findings.slice(0, 6).forEach((f) => {
-    y = textBlock(doc, `• ${f}`, M, y, { maxW: CW, fs: 9, lh: 1.4, mb: 1 })
-  })
-  y += 2
-  y = checkPage(doc, y, 10)
-  doc.setFont('helvetica','bold'); doc.text('Recommendations', M, y); y += 6
-  doc.setFont('helvetica','normal')
-  recs.slice(0, 6).forEach((r) => {
-    y = textBlock(doc, `• ${r}`, M, y, { maxW: CW, fs: 9, lh: 1.4, mb: 1 })
-  })
-  y += 3
-  doc.setFontSize(8); doc.setTextColor(...C.muted)
-  y = textBlock(doc, `Dataset context: ${s(description || '')}`, M, y, { maxW: CW, fs: 8, lh: 1.4, mb: 0, color: C.muted })
-  return doc.output('blob')
+  return exportAuditToPdf(result, description, { returnBlob: true })
 }
 
 // ── Text-mode export (kept for /results page) ───────────────────────────────

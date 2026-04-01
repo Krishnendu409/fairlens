@@ -568,8 +568,10 @@ export default function AuditResultsPage() {
   const [exporting, setExporting] = useState(false)
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState('')
   const [previewingPdf, setPreviewingPdf] = useState(false)
+  const [pdfPreviewError, setPdfPreviewError] = useState('')
   const [showBadgeModal, setShowBadgeModal] = useState(false)
   const [searchParams] = useSearchParams()
+  const [complianceDraft, setComplianceDraft] = useState({})
 
   let result, datasetDescription
   if (location.state?.result) {
@@ -589,6 +591,10 @@ export default function AuditResultsPage() {
       try { sessionStorage.setItem('auditResult', JSON.stringify({ result, description: datasetDescription })) } catch {}
     }
   }, [result, datasetDescription])
+
+  useEffect(() => {
+    setComplianceDraft(result?.compliance_metadata || {})
+  }, [result])
 
   useEffect(() => () => {
     setPdfPreviewUrl(prev => {
@@ -668,18 +674,26 @@ export default function AuditResultsPage() {
 
   async function handleExport() {
     setExporting(true)
-    try { await exportAuditToPdf(result, datasetDescription) } finally { setExporting(false) }
+    try {
+      const payload = { ...result, compliance_metadata: { ...(result?.compliance_metadata || {}), ...complianceDraft } }
+      await exportAuditToPdf(payload, datasetDescription)
+    } finally { setExporting(false) }
   }
 
   async function handlePreviewPdf() {
     setPreviewingPdf(true)
+    setPdfPreviewError('')
     try {
-      const blob = await exportAuditToPdfBlob(result, datasetDescription)
+      const payload = { ...result, compliance_metadata: { ...(result?.compliance_metadata || {}), ...complianceDraft } }
+      const blob = await exportAuditToPdfBlob(payload, datasetDescription)
       const nextUrl = URL.createObjectURL(blob)
       setPdfPreviewUrl(prev => {
         if (prev) URL.revokeObjectURL(prev)
         return nextUrl
       })
+    } catch (error) {
+      console.error('PDF preview failed:', error)
+      setPdfPreviewError('Preview failed. Check missing required fields.')
     } finally {
       setPreviewingPdf(false)
     }
@@ -715,7 +729,7 @@ export default function AuditResultsPage() {
             <Icon name="pdf" size={13}/> {exporting ? 'Generating...' : 'EU Compliance Report'}
           </button>
           <button className={styles.actionBtn} onClick={handlePreviewPdf} disabled={previewingPdf}>
-            <Icon name="chart" size={13}/> {previewingPdf ? 'Preparing...' : 'Preview PDF'}
+            <Icon name="chart" size={13}/> {previewingPdf ? 'Generating PDF...' : 'Preview PDF'}
           </button>
         </div>
       </header>
@@ -735,10 +749,47 @@ export default function AuditResultsPage() {
 
       {/* ── Tab Content ── */}
       <div className={styles.main}>
+        {pdfPreviewError && (
+          <div className={styles.card}>
+            <h3 className={styles.sectionTitle} style={{ color: 'var(--red)' }}>Preview failed. Check missing required fields.</h3>
+          </div>
+        )}
         {pdfPreviewUrl && (
           <div className={styles.card}>
             <h3 className={styles.sectionTitle}>PDF Preview</h3>
             <iframe title="Audit PDF Preview" src={pdfPreviewUrl} style={{ width: '100%', minHeight: 500, border: '1px solid var(--border)', borderRadius: 8 }} />
+          </div>
+        )}
+
+        {activeTab === 'summary' && (
+          <div className={styles.card}>
+            <h3 className={styles.sectionTitle}>Compliance Metadata (for report only)</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+              {[
+                ['dataset_name', 'Dataset name'],
+                ['dataset_version', 'Dataset version'],
+                ['data_source', 'Data source'],
+                ['lawful_basis', 'Lawful basis'],
+                ['purpose_of_processing', 'Purpose of processing'],
+                ['dpia_status', 'DPIA status'],
+                ['oversight_contact', 'Human oversight contact'],
+                ['security_assessment_status', 'Security assessment'],
+                ['monitoring_frequency', 'Monitoring frequency'],
+                ['intended_use', 'Intended use'],
+                ['system_limitations', 'System limitations'],
+                ['log_retention_policy', 'Log retention policy'],
+              ].map(([key, label]) => (
+                <label key={key} style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
+                  <span>{label}</span>
+                  <input
+                    value={complianceDraft?.[key] || ''}
+                    onChange={(e) => setComplianceDraft((prev) => ({ ...prev, [key]: e.target.value }))}
+                    placeholder="NOT PROVIDED"
+                    style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)' }}
+                  />
+                </label>
+              ))}
+            </div>
           </div>
         )}
 
