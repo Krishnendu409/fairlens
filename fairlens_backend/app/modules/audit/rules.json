@@ -1,0 +1,37 @@
+{
+  "articles": [
+    {
+      "article": "Article 9",
+      "title": "Risk management system",
+      "rules": [
+        { "kind": "metric", "metric_key": "demographic_parity_difference", "threshold": 0.1, "direction": "max" },
+        { "kind": "metric", "metric_key": "theil_index", "threshold": 0.05, "direction": "max" }
+      ]
+    },
+    {
+      "article": "Article 10",
+      "title": "Data and data governance",
+      "rules": [
+        { "kind": "metric", "metric_key": "disparate_impact_ratio", "threshold": 0.8, "direction": "min" },
+        { "kind": "metadata_required", "field": "dataset_name" },
+        { "kind": "metadata_required", "field": "data_source" }
+      ]
+    },
+    {
+      "article": "Article 13",
+      "title": "Transparency and provision of information",
+      "rules": [
+        { "kind": "metadata_required", "field": "intended_use" },
+        { "kind": "metadata_required", "field": "limitations" }
+      ]
+    },
+    {
+      "article": "Article 15",
+      "title": "Accuracy, robustness and cybersecurity",
+      "rules": [
+        { "kind": "metric", "metric_key": "tpr_gap", "threshold": 0.1, "direction": "max" },
+        { "kind": "metric", "metric_key": "fpr_gap", "threshold": 0.1, "direction": "max" }
+      ]
+    }
+  ]
+}
