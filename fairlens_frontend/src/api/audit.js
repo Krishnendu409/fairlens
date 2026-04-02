@@ -1,5 +1,4 @@
 import axios from 'axios'
-import Papa from 'papaparse'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
@@ -28,13 +27,44 @@ export function parseCsvHeaders(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = (e) => {
-      const text = e.target.result
-      const parsed = Papa.parse(text, { header: true, preview: 1, skipEmptyLines: true })
-      if (parsed.errors?.length) {
-        reject(new Error(parsed.errors[0].message || 'Could not parse CSV headers'))
+      const text = String(e.target.result || '')
+      const firstDataLine = text
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .find(line => line.length > 0)
+      if (!firstDataLine) {
+        resolve([])
         return
       }
-      resolve(parsed.meta.fields || [])
+
+      const headers = []
+      let current = ''
+      let inQuotes = false
+      for (let i = 0; i < firstDataLine.length; i += 1) {
+        const ch = firstDataLine[i]
+        if (ch === '"') {
+          if (inQuotes && firstDataLine[i + 1] === '"') {
+            current += '"'
+            i += 1
+          } else {
+            inQuotes = !inQuotes
+          }
+          continue
+        }
+        if (ch === ',' && !inQuotes) {
+          headers.push(current.trim())
+          current = ''
+          continue
+        }
+        current += ch
+      }
+      headers.push(current.trim())
+
+      const cleaned = headers
+        .map(h => h.replace(/^"(.*)"$/, '$1').trim())
+        .filter(Boolean)
+
+      resolve(cleaned)
     }
     reader.onerror = reject
     reader.readAsText(file)
@@ -54,11 +84,6 @@ export async function auditDataset({
     sensitive_column: sensitiveColumn || null,
     sensitive_column_2: sensitiveColumn2 || null,
   })
-  return data
-}
-
-export async function sampleAudit(datasetName) {
-  const { data } = await api.get(`/sample-audit/${datasetName}`)
   return data
 }
 

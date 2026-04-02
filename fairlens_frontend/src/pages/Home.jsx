@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { analyseText } from '../api/fairlens'
-import { auditDataset, parseCsvHeaders, sampleAudit } from '../api/audit'
+import { auditDataset, parseCsvHeaders } from '../api/audit'
 import { saveToHistory, saveToAuditHistory, generateId, getHistory, getAuditHistory } from '../api/history'
 import DatasetUpload from '../components/DatasetUpload'
 import HistoryPanel from '../components/HistoryPanel'
@@ -104,26 +104,6 @@ export default function Home() {
       return
     }
     navigate('/audit-results')
-  }
-
-  async function runSample(datasetName) {
-    setAuditError('')
-    setAuditLoading(true)
-    try {
-      const result = await sampleAudit(datasetName)
-      saveToAuditHistory({
-        id: generateId(),
-        timestamp: Date.now(),
-        description: `Sample: ${datasetName}`,
-        audit_id: result?.audit_id || null,
-        result,
-      })
-      navigate('/audit-results', { state: { result, description: `Sample: ${datasetName}` } })
-    } catch (err) {
-      setAuditError(`Sample audit failed: ${err?.response?.data?.detail || err.message}`)
-    } finally {
-      setAuditLoading(false)
-    }
   }
 
   const canRunAudit = csvFile && description.trim().length > 10
@@ -262,10 +242,6 @@ export default function Home() {
                   <p className={styles.stepHint}>
                     FairLens sends your dataset statistics and description to Gemini 2.5 Flash. It computes fairness metrics, detects bias patterns, and returns a structured audit report with findings, charts, and recommendations.
                   </p>
-                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                    <button className={styles.exampleBtn} type="button" onClick={() => runSample('compas')} disabled={auditLoading}>Sample: COMPAS</button>
-                    <button className={styles.exampleBtn} type="button" onClick={() => runSample('adult_income')} disabled={auditLoading}>Sample: Adult Income</button>
-                  </div>
                 </div>
               </div>
             </div>

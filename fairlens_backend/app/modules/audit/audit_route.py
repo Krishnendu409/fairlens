@@ -2,9 +2,6 @@
 audit_route.py — audit endpoints + compliance record persistence
 """
 
-import csv
-import io
-import random
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -28,51 +25,6 @@ from app.modules.audit.compliance_store import ComplianceFileStore, JSONStorageM
 router = APIRouter(tags=["Audit"])
 store = ComplianceFileStore()
 audit_storage = JSONStorageManager()
-SAMPLE_ROWS = 100
-# Fixed seeds are intentional for deterministic, reproducible demo samples.
-
-
-def _generate_compas_sample_csv(rows: int = SAMPLE_ROWS) -> str:
-    rng = random.Random(42)
-    out = io.StringIO()
-    writer = csv.writer(out)
-    writer.writerow(["race", "sex", "two_year_recid", "prediction", "age"])
-    for i in range(rows):
-        race = "African-American" if (i % 5 in (0, 1, 2)) else "Caucasian"
-        sex = "Male" if (i % 2 == 0) else "Female"
-        age = 18 + (i % 45)
-        recid_prob = 0.58 if race == "African-American" else 0.34
-        recid_prob += 0.05 if sex == "Male" else -0.02
-        recid = 1 if rng.random() < max(0.05, min(0.95, recid_prob)) else 0
-        pred_noise = 0.12
-        if rng.random() < pred_noise:
-            pred = 1 - recid
-        else:
-            pred = recid
-        writer.writerow([race, sex, recid, pred, age])
-    return out.getvalue()
-
-
-def _generate_adult_sample_csv(rows: int = SAMPLE_ROWS) -> str:
-    rng = random.Random(84)
-    out = io.StringIO()
-    writer = csv.writer(out)
-    writer.writerow(["sex", "income", "prediction", "age", "hours_per_week"])
-    for i in range(rows):
-        sex = "Male" if (i % 2 == 0) else "Female"
-        age = 22 + (i % 40)
-        hours = 30 + (i % 26)
-        income_prob = 0.57 if sex == "Male" else 0.36
-        if hours >= 45:
-            income_prob += 0.10
-        if age >= 35:
-            income_prob += 0.04
-        income = 1 if rng.random() < max(0.05, min(0.95, income_prob)) else 0
-        pred = income if rng.random() > 0.1 else 1 - income
-        writer.writerow([sex, income, pred, age, hours])
-    return out.getvalue()
-
-
 def _iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -243,39 +195,6 @@ async def audit_dataset(request: AuditRequest):
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Audit failed: {str(e)}")
-
-
-@router.get("/sample-audit/{dataset_name}", response_model=AuditResponse)
-async def sample_audit(dataset_name: str):
-    """
-    Run instant demo audits for built-in datasets.
-    Supported: compas, adult_income
-    """
-    samples = {
-        "compas": _generate_compas_sample_csv(),
-        "adult_income": _generate_adult_sample_csv(),
-    }
-    key = dataset_name.strip().lower()
-    if key not in samples:
-        raise HTTPException(status_code=404, detail="Unknown sample dataset. Use compas or adult_income.")
-    import base64
-
-    b64 = base64.b64encode(samples[key].encode("utf-8")).decode("utf-8")
-    payload = AuditRequest(
-        dataset=b64,
-        description=f"Sample audit for {key}",
-        target_column="two_year_recid" if key == "compas" else "income",
-        sensitive_column="race" if key == "compas" else "sex",
-        prediction_column="prediction",
-    )
-    try:
-        return await run_audit(payload)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sample audit failed: {str(e)}")
 
 
 @router.post("/audit-chat", response_model=ChatResponse)

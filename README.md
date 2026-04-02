@@ -55,7 +55,7 @@ Frontend runs on `http://localhost:5173`.
 
 ## Demo
 
-Use the built-in **Sample: COMPAS** and **Sample: Adult Income** buttons on the home page to run instant audits.
+Upload your own CSV dataset on the home page and run an instant fairness audit.
 
 ## EU AI Act Compliance Engine
 
