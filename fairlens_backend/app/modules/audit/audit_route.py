@@ -2,6 +2,9 @@
 audit_route.py — audit endpoints + compliance record persistence
 """
 
+import csv
+import io
+import random
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -20,10 +23,54 @@ from app.schemas.audit_schema import (
     VALIDATION_ROLES,
 )
 from app.modules.audit.audit_service import run_audit, run_chat
-from app.modules.audit.compliance_store import ComplianceFileStore
+from app.modules.audit.compliance_store import ComplianceFileStore, JSONStorageManager
 
 router = APIRouter(tags=["Audit"])
 store = ComplianceFileStore()
+audit_storage = JSONStorageManager()
+SAMPLE_ROWS = 100
+# Fixed seeds are intentional for deterministic, reproducible demo samples.
+
+
+def _generate_compas_sample_csv(rows: int = SAMPLE_ROWS) -> str:
+    rng = random.Random(42)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["race", "sex", "two_year_recid", "prediction", "age"])
+    for i in range(rows):
+        race = "African-American" if (i % 5 in (0, 1, 2)) else "Caucasian"
+        sex = "Male" if (i % 2 == 0) else "Female"
+        age = 18 + (i % 45)
+        recid_prob = 0.58 if race == "African-American" else 0.34
+        recid_prob += 0.05 if sex == "Male" else -0.02
+        recid = 1 if rng.random() < max(0.05, min(0.95, recid_prob)) else 0
+        pred_noise = 0.12
+        if rng.random() < pred_noise:
+            pred = 1 - recid
+        else:
+            pred = recid
+        writer.writerow([race, sex, recid, pred, age])
+    return out.getvalue()
+
+
+def _generate_adult_sample_csv(rows: int = SAMPLE_ROWS) -> str:
+    rng = random.Random(84)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["sex", "income", "prediction", "age", "hours_per_week"])
+    for i in range(rows):
+        sex = "Male" if (i % 2 == 0) else "Female"
+        age = 22 + (i % 40)
+        hours = 30 + (i % 26)
+        income_prob = 0.57 if sex == "Male" else 0.36
+        if hours >= 45:
+            income_prob += 0.10
+        if age >= 35:
+            income_prob += 0.04
+        income = 1 if rng.random() < max(0.05, min(0.95, income_prob)) else 0
+        pred = income if rng.random() > 0.1 else 1 - income
+        writer.writerow([sex, income, pred, age, hours])
+    return out.getvalue()
 
 
 def _iso_now() -> str:
@@ -205,22 +252,8 @@ async def sample_audit(dataset_name: str):
     Supported: compas, adult_income
     """
     samples = {
-        "compas": """race,sex,two_year_recid,prediction,age
-African-American,Male,1,1,23
-African-American,Male,1,1,31
-Caucasian,Male,0,0,42
-Caucasian,Female,0,0,37
-African-American,Female,1,1,29
-Caucasian,Male,0,1,51
-""",
-        "adult_income": """sex,income,prediction,age,hours_per_week
-Male,1,1,39,40
-Female,0,0,38,35
-Male,1,1,28,50
-Female,0,1,44,45
-Male,0,0,35,20
-Female,1,1,41,45
-""",
+        "compas": _generate_compas_sample_csv(),
+        "adult_income": _generate_adult_sample_csv(),
     }
     key = dataset_name.strip().lower()
     if key not in samples:
@@ -256,6 +289,18 @@ async def audit_chat(request: ChatRequest):
         return await run_chat(request)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+
+
+@router.get("/audit-results/{audit_id}", response_model=AuditResponse)
+async def get_audit_result(audit_id: str):
+    try:
+        record = audit_storage.load_audit(audit_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Audit not found")
+    result = ((record.get("compliance") or {}).get("result")) or {}
+    if not result:
+        raise HTTPException(status_code=404, detail="Audit result payload not found")
+    return AuditResponse(**result)
 
 
 @router.post("/compliance-records/snapshot", response_model=ComplianceRecordResponse)

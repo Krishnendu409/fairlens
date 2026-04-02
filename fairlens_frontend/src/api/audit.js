@@ -1,4 +1,5 @@
 import axios from 'axios'
+import Papa from 'papaparse'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
@@ -8,9 +9,18 @@ const api = axios.create({
 export function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
+    reader.onload = () => {
+      const bytes = new Uint8Array(reader.result)
+      let binary = ''
+      const chunkSize = 0x8000
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        const chunk = bytes.subarray(i, i + chunkSize)
+        binary += String.fromCharCode(...chunk)
+      }
+      resolve(btoa(binary))
+    }
     reader.onerror = reject
-    reader.readAsDataURL(file)
+    reader.readAsArrayBuffer(file)
   })
 }
 
@@ -18,9 +28,13 @@ export function parseCsvHeaders(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = (e) => {
-      const firstLine = e.target.result.split('\n')[0]
-      const headers = firstLine.split(',').map(h => h.trim().replace(/^"|"$/g, ''))
-      resolve(headers)
+      const text = e.target.result
+      const parsed = Papa.parse(text, { header: true, preview: 1, skipEmptyLines: true })
+      if (parsed.errors?.length) {
+        reject(new Error(parsed.errors[0].message || 'Could not parse CSV headers'))
+        return
+      }
+      resolve(parsed.meta.fields || [])
     }
     reader.onerror = reject
     reader.readAsText(file)
@@ -45,6 +59,11 @@ export async function auditDataset({
 
 export async function sampleAudit(datasetName) {
   const { data } = await api.get(`/sample-audit/${datasetName}`)
+  return data
+}
+
+export async function getAuditResultById(auditId) {
+  const { data } = await api.get(`/audit-results/${encodeURIComponent(auditId)}`)
   return data
 }
 

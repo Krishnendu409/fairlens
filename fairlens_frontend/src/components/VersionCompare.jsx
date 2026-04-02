@@ -1,5 +1,6 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { getAuditHistory } from '../api/history'
+import { getAuditResultById } from '../api/audit'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from 'recharts'
 import Icon from './Icon'
 import styles from './VersionCompare.module.css'
@@ -7,20 +8,41 @@ import styles from './VersionCompare.module.css'
 export default function VersionCompare({ currentResult }) {
   const history = getAuditHistory()
   const [selectedId, setSelectedId] = useState(history.length > 0 ? history[0].id : null)
+  const [resolvedHistory, setResolvedHistory] = useState(history)
 
-  const timelineData = useMemo(() => {
-    return [...history].reverse().map(h => ({
-      date: new Date(h.timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
-      score: h.result?.bias_score || 0
-    }))
+  useEffect(() => {
+    let active = true
+    ;(async () => {
+      const hydrated = await Promise.all(history.map(async (h) => {
+        if (h.result || !h.audit_id) return h
+        try {
+          const result = await getAuditResultById(h.audit_id)
+          return { ...h, result }
+        } catch {
+          return h
+        }
+      }))
+      if (active) setResolvedHistory(hydrated)
+    })()
+    return () => { active = false }
   }, [history])
 
-  if (history.length === 0) {
+  const timelineData = useMemo(() => {
+    return [...resolvedHistory].reverse().map(h => ({
+      date: new Date(h.timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+      score: h.result?.bias_score || h.bias_score || 0
+    }))
+  }, [resolvedHistory])
+
+  if (resolvedHistory.length === 0) {
     return <p className={styles.empty}>No past audits found in local history to compare.</p>
   }
 
-  const compareItem = history.find(h => h.id === selectedId) || history[0]
-  const oldResult = compareItem.result
+  const compareItem = resolvedHistory.find(h => h.id === selectedId) || resolvedHistory[0]
+  const oldResult = compareItem.result || {
+    bias_score: compareItem.bias_score,
+    metrics: [],
+  }
   
   if (!oldResult) return null
 
@@ -42,7 +64,7 @@ export default function VersionCompare({ currentResult }) {
         <h3>Audit History</h3>
         <p className={styles.sidebarDesc}>Select a past version to compare.</p>
         <div className={styles.historyList}>
-          {history.map(h => (
+          {resolvedHistory.map(h => (
             <button 
               key={h.id} 
               className={`${styles.historyBtn} ${selectedId === h.id ? styles.active : ''}`}

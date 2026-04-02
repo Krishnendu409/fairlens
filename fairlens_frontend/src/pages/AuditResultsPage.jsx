@@ -6,6 +6,7 @@ import {
   CartesianGrid, Cell, LabelList, Legend,
 } from 'recharts'
 import { sendChatMessage } from '../api/audit'
+import { getAuditResultById } from '../api/audit'
 import { exportAuditToPdf, exportAuditToPdfBlob } from '../api/exportPdf'
 import BiasGauge from '../components/BiasGauge'
 import ThemeToggle from '../components/ThemeToggle'
@@ -62,6 +63,7 @@ function toCompactSentence(text, maxLen = 180) {
 // ── Chat Panel ────────────────────────────────────────────────────────────────
 function ChatPanel({ datasetDescription, auditSummary }) {
   const [messages, setMessages] = useState([{
+    id: 'assistant-initial',
     role: 'assistant',
     content: "Audit complete. Ask me anything — why bias exists, what metrics mean, or how to reduce it."
   }])
@@ -74,7 +76,8 @@ function ChatPanel({ datasetDescription, auditSummary }) {
     const msg = input.trim()
     if (!msg || loading) return
     setInput('')
-    const newMessages = [...messages, { role: 'user', content: msg }]
+    const userId = `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const newMessages = [...messages, { id: userId, role: 'user', content: msg }]
     setMessages(newMessages)
     setLoading(true)
     try {
@@ -83,9 +86,11 @@ function ChatPanel({ datasetDescription, auditSummary }) {
         conversation: newMessages.slice(1, -1),
         message: msg,
       })
-      setMessages(prev => [...prev, { role: 'assistant', content: reply }])
+      const assistantId = `a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: reply }])
     } catch {
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Connection error. Please try again.' }])
+      const assistantErrorId = `a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      setMessages(prev => [...prev, { id: assistantErrorId, role: 'assistant', content: 'Connection error. Please try again.' }])
     } finally { setLoading(false) }
   }
 
@@ -98,8 +103,8 @@ function ChatPanel({ datasetDescription, auditSummary }) {
         </div>
       </div>
       <div className={styles.chatMessages}>
-        {messages.map((m, i) => (
-          <div key={i} className={`${styles.chatBubble} ${m.role === 'user' ? styles.chatUser : styles.chatBot}`}>
+        {messages.map((m) => (
+          <div key={m.id} className={`${styles.chatBubble} ${m.role === 'user' ? styles.chatUser : styles.chatBot}`}>
             {m.role === 'assistant' && <div className={styles.chatAvatar}>FL</div>}
             <div className={styles.chatText}>{m.content}</div>
           </div>
@@ -293,7 +298,7 @@ function CounterfactualEditor({ sampleRows, sensitiveCol, groupRatesMap, allNume
     try {
       return computeFeatureWeights(sampleRows || [], numericCols, sensitiveCol, normalizedRates)
     } catch { return Object.fromEntries(numericCols.map(c => [c, 0.5])) }
-  }, [sampleRows, numericCols.join(','), sensitiveCol, JSON.stringify(normalizedRates)])
+  }, [sampleRows, numericCols.join(','), sensitiveCol, availableGroups.join(','), ...availableGroups.map(g => normalizedRates[g])])
 
   useEffect(() => {
     if (sampleRows && sampleRows.length > 0 && sensitiveCol) {
@@ -579,19 +584,55 @@ export default function AuditResultsPage() {
   const [searchParams] = useSearchParams()
   const [showComplianceMetadataForm, setShowComplianceMetadataForm] = useState(false)
   const [complianceDraft, setComplianceDraft] = useState({})
+  const [shareError, setShareError] = useState('')
+  const [idFetchedResult, setIdFetchedResult] = useState(null)
+  const [idFetchError, setIdFetchError] = useState('')
+  const sharedParam = searchParams.get('shared')
 
   let result, datasetDescription
   if (location.state?.result) {
     result = location.state.result; datasetDescription = location.state.description || ''
-  } else if (searchParams.get('shared')) {
-    const decoded = decodeShareData(searchParams.get('shared'))
-    if (decoded?.result) { result = decoded.result; datasetDescription = decoded.description || '' }
+  } else if (idFetchedResult) {
+    result = idFetchedResult
+    datasetDescription = ''
+  } else if (searchParams.get('id')) {
+    result = null
+  } else if (sharedParam) {
+    const decoded = decodeShareData(sharedParam)
+    if (decoded?.data?.result) {
+      result = decoded.data.result
+      datasetDescription = decoded.data.description || ''
+    }
   } else {
     try {
       const saved = sessionStorage.getItem('auditResult')
       if (saved) { const p = JSON.parse(saved); result = p.result; datasetDescription = p.description || '' }
     } catch {}
   }
+
+  useEffect(() => {
+    const sharedId = searchParams.get('id')
+    if (!sharedId) return
+    let active = true
+    ;(async () => {
+      try {
+        const fetched = await getAuditResultById(sharedId)
+        if (!active) return
+        setIdFetchedResult(fetched)
+        setIdFetchError('')
+      } catch (err) {
+        if (!active) return
+        setIdFetchError(err?.response?.data?.detail || 'Shared audit could not be loaded.')
+      }
+    })()
+    return () => { active = false }
+  }, [searchParams])
+
+  useEffect(() => {
+    if (!sharedParam) return
+    const decoded = decodeShareData(sharedParam)
+    if (decoded?.error) setShareError(decoded.error)
+  }, [sharedParam])
 
   useEffect(() => {
     if (result) {
@@ -605,7 +646,7 @@ export default function AuditResultsPage() {
 
   if (!result) return (
     <div className={styles.noResult}>
-      <p>No audit data found.</p>
+      <p>{idFetchError || shareError || 'No audit data found.'}</p>
       <button className={styles.backBtn} onClick={() => navigate('/')}>← Back to Home</button>
     </div>
   )
@@ -675,7 +716,14 @@ export default function AuditResultsPage() {
 
   async function handleShare() {
     try {
-      await navigator.clipboard.writeText(buildShareUrl({ result, description: datasetDescription }))
+      const shareUrl = result.audit_id
+        ? buildShareUrl(result.audit_id)
+        : buildShareUrl({ result, description: datasetDescription })
+      if (!shareUrl) {
+        setShareState('error')
+        return
+      }
+      await navigator.clipboard.writeText(shareUrl)
       setShareState('copied'); setTimeout(() => setShareState('idle'), 2000)
     } catch { setShareState('idle') }
   }

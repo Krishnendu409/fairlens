@@ -172,14 +172,28 @@ class ComplianceFileStore:
             with open(self.index_file, "w", encoding="utf-8") as f:
                 json.dump({}, f)
 
-    def _load_index_unlocked(self) -> Dict[str, str]:
+    def _load_index_unlocked(self) -> Dict[str, Dict[str, str]]:
         if self.index_file.exists():
             with open(self.index_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data if isinstance(data, dict) else {}
+                if not isinstance(data, dict):
+                    return {}
+                normalized: Dict[str, Dict[str, str]] = {}
+                for record_id, value in data.items():
+                    if isinstance(value, dict):
+                        normalized[record_id] = {
+                            "record_file": value.get("record_file", f"{record_id}.json"),
+                            "integrity_hash": value.get("integrity_hash", ""),
+                        }
+                    elif isinstance(value, str):
+                        normalized[record_id] = {
+                            "record_file": f"{record_id}.json",
+                            "integrity_hash": value,
+                        }
+                return normalized
         return {}
 
-    def _write_index_unlocked(self, index: Dict[str, str]) -> None:
+    def _write_index_unlocked(self, index: Dict[str, Dict[str, str]]) -> None:
         fd, temp_name = tempfile.mkstemp(prefix="compliance_", suffix=".tmp", dir=str(self.store_dir))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as tmp:
@@ -200,12 +214,16 @@ class ComplianceFileStore:
     def save(self, record: Dict[str, Any], previous_hash: Optional[str] = None) -> Dict[str, Any]:
         with self._lock:
             integrity_hash = record["integrity_hash"]
-            record_path = self.store_dir / f"{integrity_hash}.json"
+            record_file = f"{record['record_id']}.json"
+            record_path = self.store_dir / record_file
             with open(record_path, "w", encoding="utf-8") as f:
                 json.dump(record, f, indent=2, ensure_ascii=False)
 
             index = self._load_index_unlocked()
-            index[record["record_id"]] = integrity_hash
+            index[record["record_id"]] = {
+                "record_file": record_file,
+                "integrity_hash": integrity_hash,
+            }
             self._write_index_unlocked(index)
 
             if previous_hash and previous_hash != integrity_hash:
@@ -217,10 +235,10 @@ class ComplianceFileStore:
     def get(self, record_id: str) -> Dict[str, Any]:
         with self._lock:
             index = self._load_index_unlocked()
-            integrity_hash = index.get(record_id)
-            if not integrity_hash:
+            entry = index.get(record_id)
+            if not entry:
                 raise FileNotFoundError(f"Record {record_id} not found")
-            record_path = self.store_dir / f"{integrity_hash}.json"
+            record_path = self.store_dir / entry.get("record_file", f"{record_id}.json")
             with open(record_path, "r", encoding="utf-8") as f:
                 return json.load(f)
 
@@ -232,7 +250,8 @@ class ComplianceFileStore:
 
     def get_current_hash(self, record_id: str) -> Optional[str]:
         with self._lock:
-            return self._load_index_unlocked().get(record_id)
+            entry = self._load_index_unlocked().get(record_id)
+            return entry.get("integrity_hash") if entry else None
 
 
 __all__ = ["JSONStorageManager", "ComplianceFileStore"]

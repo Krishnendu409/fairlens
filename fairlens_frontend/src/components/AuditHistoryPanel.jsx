@@ -31,7 +31,13 @@ export default function AuditHistoryPanel({ onOpen, onClose }) {
         ) : (
           <div className={styles.list}>
             {history.map(entry => {
-              const r = entry.result
+              const r = entry.result || {
+                bias_score: entry.bias_score,
+                bias_level: entry.bias_level,
+                total_rows: entry.total_rows,
+                sensitive_column: entry.sensitive_column,
+                target_column: entry.target_column,
+              }
               const level = r.bias_level || 'Moderate'
               const color = levelColor[level] || '#fbbf24'
               return (

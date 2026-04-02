@@ -29,7 +29,9 @@ LABEL-ONLY MODE:
   Showing 0.0000 for unmeasured metrics is misleading — they are None.
 """
 
-import os, json, re, base64, io, ssl
+import asyncio
+import logging
+import os, json, re, ssl
 from typing import Optional, Tuple
 from dotenv import load_dotenv
 
@@ -44,11 +46,15 @@ from app.schemas.audit_schema import (
     ConfusionMatrix, StatisticalTest,
     MitigationMethodResult, MitigationSummary,
 )
-from app.modules.audit.audit_utils import compute_integrity_hash
+from app.modules.audit.audit_utils import (
+    compute_integrity_hash,
+    decode_csv,
+)
 from app.modules.audit.compliance_engine import evaluate_eu_ai_act
 from app.modules.audit.compliance_store import JSONStorageManager
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 DPD_THRESHOLD = 0.10
 IMBALANCE_HIGH_THRESHOLD = 0.35
@@ -58,6 +64,12 @@ ROC_UNCERTAIN_UPPER_THRESHOLD = 0.60
 # Small deterministic tie-breaker (3%) used only when method scores are close,
 # so scenario-prioritized methods remain preferred without overpowering evidence.
 SCENARIO_SELECTION_BONUS = 0.03
+MIN_AUDIT_ROWS = 30
+MAX_CHAT_TURNS = 10
+MAX_STORED_DESCRIPTION_CHARS = 2000
+HIGH_CARD_LIMIT = 20
+PII_COLUMN_KEYWORDS = {"name", "email", "phone", "mobile", "address", "ssn", "dob", "birth", "passport"}
+MAX_CHAT_MESSAGE_CHARS = 1200
 
 DOMAIN_SCENARIO_KEYWORDS = {
     "hr_employment": {
@@ -170,6 +182,19 @@ def _safe_json(obj) -> str:
     return json.dumps(obj, cls=_Enc)
 
 
+def _sanitize_description_for_storage(description: str, columns: list[str]) -> str:
+    text = (description or "")[:MAX_STORED_DESCRIPTION_CHARS]
+    redacted = text
+    for col in columns:
+        col_norm = str(col or "").strip()
+        if not col_norm:
+            continue
+        lower_col = col_norm.lower()
+        if any(keyword in lower_col for keyword in PII_COLUMN_KEYWORDS):
+            redacted = re.sub(rf"\b{re.escape(col_norm)}\b", "[redacted_column]", redacted, flags=re.IGNORECASE)
+    return redacted
+
+
 def _build_gemini_url() -> str:
     """
     Gemini endpoint is configurable to avoid TLS hostname issues when traffic is
@@ -207,16 +232,6 @@ def _unwrap_ssl_error(exc: Exception) -> Optional[ssl.SSLCertVerificationError]:
         seen.add(id(cur))
         cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
     return None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. CSV DECODE
-# ─────────────────────────────────────────────────────────────────────────────
-
-def decode_csv(b64: str) -> pd.DataFrame:
-    if b64.startswith("data:"):
-        b64 = b64.split(",", 1)[1]
-    return pd.read_csv(io.BytesIO(base64.b64decode(b64)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -342,10 +357,14 @@ def compute_theil_index(rates: list) -> float:
 def compute_raw_stats(df: pd.DataFrame, description: str,
                       target_col: Optional[str], sensitive_col: Optional[str],
                       sensitive_col_2: Optional[str],
-                      prediction_col: Optional[str] = None) -> dict:
+                      prediction_col: Optional[str] = None,
+                      resolve_columns: bool = True) -> dict:
 
-    target_col, sensitive_col, prediction_col, numeric_col = \
-        detect_columns(df, target_col, sensitive_col, prediction_col)
+    if resolve_columns:
+        target_col, sensitive_col, prediction_col, numeric_col = \
+            detect_columns(df, target_col, sensitive_col, prediction_col)
+    else:
+        _, _, _, numeric_col = detect_columns(df, target_col, sensitive_col, prediction_col)
 
     has_predictions = bool(prediction_col and prediction_col in df.columns)
 
@@ -1034,13 +1053,18 @@ def _method_reweighing(df, computed):
         dpd_after, dir_after = _compute_dpd_dir_from_rates(new_rates)
         return {"method":"reweighing","method_type":"pre-processing","accuracy":acc,"precision":None,"recall":None,"dpd":dpd_after,"dir":dir_after,
                 "tpr_gap":None,"fpr_gap":None,"adjusted_rates":new_rates}
-    except Exception as e:
+    except (ValueError, KeyError, pd.errors.MergeError) as e:
         return {"method":"reweighing","error":str(e)}
+    except Exception:
+        logger.exception("Unexpected error in reweighing mitigation")
+        return {"method":"reweighing","error":"Internal error — see server logs"}
 
 
 def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
     try:
         from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
 
         sc = computed["sensitive_col"]; tc = computed["target_col"]
         pc = computed["positive_class"]; gs = computed["group_stats"]
@@ -1053,9 +1077,10 @@ def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
         if len(np.unique(y)) < 2:
             return {"method":"threshold_optimisation","error":"target column has only one class"}
 
-        # Keep solver budget aligned with other mitigation methods while avoiding
-        # excessive runtime in request/response audits.
-        base_model = LogisticRegression(max_iter=200)
+        base_model = Pipeline([
+            ("scaler", StandardScaler()),
+            ("lr", LogisticRegression(max_iter=1000, solver="lbfgs")),
+        ])
         base_model.fit(X, y)
         y_prob = base_model.predict_proba(X)[:, 1]
 
@@ -1104,8 +1129,11 @@ def _method_threshold_optimisation(df, computed, lambda_acc=0.5):
         return {"method":"threshold_optimisation","method_type":"post-processing","accuracy":acc,"precision":prec,"recall":rec,"dpd":dpd_after,"dir":dir_after,
                 "tpr_gap":tpr_gap,"fpr_gap":fpr_gap,"adjusted_rates":best_rates,
                 "global_target":round(global_target,4)}
-    except Exception as e:
+    except (ValueError, KeyError, pd.errors.MergeError) as e:
         return {"method":"threshold_optimisation","error":str(e)}
+    except Exception:
+        logger.exception("Unexpected error in threshold optimisation mitigation")
+        return {"method":"threshold_optimisation","error":"Internal error — see server logs"}
 
 
 def _method_disparate_impact_remover(df, computed, repair_level=DEFAULT_REPAIR_LEVEL):
@@ -1148,13 +1176,18 @@ def _method_disparate_impact_remover(df, computed, repair_level=DEFAULT_REPAIR_L
             "fpr_gap":None,
             "adjusted_rates":adjusted_rates,
         }
-    except Exception as e:
+    except (ValueError, KeyError, pd.errors.MergeError) as e:
         return {"method":"disparate_impact_remover","error":str(e)}
+    except Exception:
+        logger.exception("Unexpected error in disparate impact remover mitigation")
+        return {"method":"disparate_impact_remover","error":"Internal error — see server logs"}
 
 
 def _method_reject_option_classification(df, computed):
     try:
         from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
 
         sc = computed["sensitive_col"]; tc = computed["target_col"]; pc = computed["positive_class"]
         if not sc or not tc:
@@ -1166,7 +1199,10 @@ def _method_reject_option_classification(df, computed):
         if len(np.unique(y)) < 2:
             return {"method":"reject_option_classification","error":"target column has only one class"}
 
-        model = LogisticRegression(max_iter=200)
+        model = Pipeline([
+            ("scaler", StandardScaler()),
+            ("lr", LogisticRegression(max_iter=1000, solver="lbfgs")),
+        ])
         model.fit(X, y)
         y_prob = model.predict_proba(X)[:, 1]
         y_pred = (y_prob >= 0.5).astype(int)
@@ -1219,8 +1255,11 @@ def _method_reject_option_classification(df, computed):
             "fpr_gap":fpr_gap,
             "adjusted_rates":adjusted_rates,
         }
-    except Exception as e:
+    except (ValueError, KeyError, pd.errors.MergeError) as e:
         return {"method":"reject_option_classification","error":str(e)}
+    except Exception:
+        logger.exception("Unexpected error in reject option classification mitigation")
+        return {"method":"reject_option_classification","error":"Internal error — see server logs"}
 
 
 def _prepare_training_frame(df: pd.DataFrame, computed: dict):
@@ -1233,12 +1272,16 @@ def _prepare_training_frame(df: pd.DataFrame, computed: dict):
     y = (y_raw == computed.get("positive_class")).astype(int)
     sensitive = df[sc].astype(str)
     train_df = train_df.drop(columns=[sc], errors="ignore")
+    cat_cols = train_df.select_dtypes(include=["object", "category"]).columns
+    for col in list(cat_cols):
+        if train_df[col].nunique(dropna=True) > HIGH_CARD_LIMIT:
+            train_df = train_df.drop(columns=[col], errors="ignore")
     train_df = pd.get_dummies(train_df, drop_first=False)
     train_df = train_df.fillna(0)
     return train_df, y, sensitive
 
 
-def run_mitigation(
+async def run_mitigation(
     df: pd.DataFrame,
     computed: dict,
     dataset_description: Optional[str] = None,
@@ -1325,12 +1368,12 @@ def run_mitigation(
         "decision_trace": decision_trace,
     }
 
-    raw_results = [
-        _method_reweighing(df, computed),
-        _method_disparate_impact_remover(df, computed),
-        _method_threshold_optimisation(df, computed),
-        _method_reject_option_classification(df, computed),
-    ]
+    raw_results = await asyncio.gather(
+        asyncio.to_thread(_method_reweighing, df, computed),
+        asyncio.to_thread(_method_disparate_impact_remover, df, computed),
+        asyncio.to_thread(_method_threshold_optimisation, df, computed),
+        asyncio.to_thread(_method_reject_option_classification, df, computed),
+    )
 
     results = []
     for r in raw_results:
@@ -1793,6 +1836,7 @@ def merge_into_response(stats, ai, root_causes, bias_origin_dict,
         primary_numeric_column=c.get("primary_numeric_column"),
         sample_rows=c.get("sample_rows", []),
         group_rates_map=c.get("group_rates_map", {}),
+        compliance={},
     )
 
 
@@ -1848,14 +1892,15 @@ async def run_chat(request: ChatRequest) -> ChatResponse:
         f"Answer concisely (2-3 paragraphs). Reference actual numbers. Give practical advice."
     )
     hist = "".join(
-        f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}\n\n"
-        for m in request.conversation
+        f"{'User' if m.get('role')=='user' else 'Assistant'}: {str(m.get('content', ''))[:MAX_CHAT_MESSAGE_CHARS]}\n\n"
+        for m in request.conversation[-MAX_CHAT_TURNS:]
     )
+    msg = (request.message or "")[:MAX_CHAT_MESSAGE_CHARS]
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 GEMINI_URL, params={"key": GEMINI_API_KEY},
-                json={"contents": [{"parts": [{"text": f"{ctx}\n\n{hist}User: {request.message}\n\nAssistant:"}]}],
+                json={"contents": [{"parts": [{"text": f"{ctx}\n\n{hist}User: {msg}\n\nAssistant:"}]}],
                       "generationConfig": {"temperature": 0.3, "maxOutputTokens": 800}},
             )
     except httpx.TransportError as exc:
@@ -1882,14 +1927,20 @@ async def run_chat(request: ChatRequest) -> ChatResponse:
 async def run_audit(request: AuditRequest) -> AuditResponse:
     import traceback
     df = decode_csv(request.dataset)
+    if len(df) < MIN_AUDIT_ROWS:
+        raise ValueError(f"Dataset too small ({len(df)} rows). Minimum {MIN_AUDIT_ROWS} required.")
     target_col, sensitive_col, pred_col, _ = detect_columns(
         df, request.target_column, request.sensitive_column, request.prediction_column
     )
+    if target_col and sensitive_col and target_col == sensitive_col:
+        raise ValueError("Target and sensitive columns cannot be the same.")
 
     try:
         reliability_dict = validate_data(df, sensitive_col, target_col)
     except Exception:
         reliability_dict = {"reliability": "Medium", "confidence_score": 50.0, "warnings": []}
+
+    safe_description = _sanitize_description_for_storage(request.description or "", list(df.columns))
 
     stats = compute_raw_stats(
         df, description=request.description,
@@ -1897,6 +1948,7 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
         sensitive_col=sensitive_col,
         sensitive_col_2=request.sensitive_column_2,
         prediction_col=pred_col,
+        resolve_columns=False,
     )
 
     c = stats["computed"]
@@ -1907,7 +1959,7 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
 
     root_causes      = generate_root_causes(stats)
     bias_origin_dict = detect_bias_origin(stats)
-    mitigation       = run_mitigation(df, c, dataset_description=request.description)
+    mitigation       = await run_mitigation(df, c, dataset_description=request.description)
     prompt           = build_prompt(stats, root_causes, reliability_dict)
     try:
         ai = await call_gemini(prompt)
@@ -1941,14 +1993,17 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
         storage = JSONStorageManager()
         saved = storage.save_audit(
             input_data={
-                "description": request.description,
+                "description": safe_description,
                 "target_column": request.target_column,
                 "sensitive_column": request.sensitive_column,
                 "sensitive_column_2": request.sensitive_column_2,
                 "prediction_column": request.prediction_column,
             },
             metrics={"bias_score": c["bias_score"], "metrics": c["metrics"], "mitigation": mitigation.model_dump()},
-            compliance=final_compliance | {"integrity_hash": integrity_hash},
+            compliance=final_compliance | {
+                "integrity_hash": integrity_hash,
+                "result": response.model_dump(),
+            },
         )
         response.audit_id = saved["id"]
         return response
