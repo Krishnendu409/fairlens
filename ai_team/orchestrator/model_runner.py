@@ -85,7 +85,7 @@ def run_model(model: str, prompt: str, retries: int = 2) -> ModelRunResult:
         "latency": None,
         "attempts": attempt_count,
         "response": "",
-        "error": last_error or "MODEL_FAILED",
+        "error": last_error or "All retry attempts failed without specific error details",
     }
 
 

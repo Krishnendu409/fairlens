@@ -7,6 +7,10 @@ except ImportError:  # script execution fallback
 
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 PROMPT_TEMPLATES_DIR = SKILLS_DIR / "prompt_templates"
+TASK_SKILLS = {
+    "coding": "code_generation.md",
+    "critic": "critique_checklist.md",
+}
 
 
 CODING_KEYWORDS = {
@@ -63,10 +67,9 @@ def build_prompt(problem: str, task_type: str) -> str:
 
     sections = [template.format(problem=problem)]
 
-    if task_type == "coding":
-        sections.append(load_skill_text(SKILLS_DIR / "code_generation.md"))
-    elif task_type == "critic":
-        sections.append(load_skill_text(SKILLS_DIR / "critique_checklist.md"))
+    task_skill_file = TASK_SKILLS.get(task_type)
+    if task_skill_file:
+        sections.append(load_skill_text(SKILLS_DIR / task_skill_file))
 
     sections.append(output_structure)
     return "\n\n".join(part for part in sections if part)
