@@ -13,7 +13,7 @@ def safe_json_parse(text: str) -> Optional[Dict[str, Any]]:
     try:
         parsed = json.loads(text)
         return parsed if isinstance(parsed, dict) else None
-    except Exception:
+    except json.JSONDecodeError:
         return None
 
 

@@ -70,7 +70,7 @@ def run_model(model: str, prompt: str, retries: int = 2) -> ModelRunResult:
             if _looks_like_oom(last_error):
                 active_prompt = trim_prompt(active_prompt)
 
-        except Exception as exc:
+        except requests.RequestException as exc:
             last_error = str(exc)
             print(f"[RETRY {attempt}] {last_error}")
             if _looks_like_oom(last_error):
@@ -85,7 +85,7 @@ def run_model(model: str, prompt: str, retries: int = 2) -> ModelRunResult:
         "latency": None,
         "attempts": attempt_count,
         "response": "",
-        "error": last_error or "All retry attempts failed without specific error details",
+        "error": last_error or "Maximum retry attempts exceeded",
     }
 
 
