@@ -60,7 +60,7 @@ def run_model(model: str, prompt: str, retries: int = 2) -> ModelRunResult:
                     "status": "ok",
                     "model": model,
                     "latency": latency,
-                    "attempts": attempt,
+                    "attempts": attempt_count,
                     "response": text,
                     "error": "",
                 }
