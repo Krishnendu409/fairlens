@@ -13,5 +13,6 @@ FALLBACK_MODELS = {
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 TIMEOUT = 120
+RETRY_DELAY_SECONDS = 2
 MAX_PROMPT_CHARS = 4500
 LOG_PATH = Path(__file__).resolve().parents[1] / "logs" / "benchmark.jsonl"

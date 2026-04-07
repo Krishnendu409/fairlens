@@ -3,7 +3,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from config import LOG_PATH, MAX_PROMPT_CHARS
+try:
+    from .config import LOG_PATH, MAX_PROMPT_CHARS
+except ImportError:  # script execution fallback
+    from config import LOG_PATH, MAX_PROMPT_CHARS
 
 
 def safe_json_parse(text: str) -> Optional[Dict[str, Any]]:

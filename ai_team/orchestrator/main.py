@@ -1,6 +1,11 @@
-from model_runner import run_task
-from skills import build_prompt, detect_task_type
-from utils import append_benchmark_log
+try:
+    from .model_runner import run_task
+    from .skills import build_prompt, detect_task_type
+    from .utils import append_benchmark_log
+except ImportError:  # script execution fallback
+    from model_runner import run_task
+    from skills import build_prompt, detect_task_type
+    from utils import append_benchmark_log
 
 
 def solve_problem(problem: str) -> str:

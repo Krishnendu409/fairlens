@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from utils import load_skill_text
+try:
+    from .utils import load_skill_text
+except ImportError:  # script execution fallback
+    from utils import load_skill_text
 
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 PROMPT_TEMPLATES_DIR = SKILLS_DIR / "prompt_templates"

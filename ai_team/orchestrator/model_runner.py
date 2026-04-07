@@ -1,13 +1,33 @@
 import time
-from typing import Dict
+from typing import TypedDict
 
 import requests
 
-from config import FALLBACK_MODELS, MODELS, OLLAMA_URL, TIMEOUT
-from utils import trim_prompt
+try:
+    from .config import (
+        FALLBACK_MODELS,
+        MODELS,
+        OLLAMA_URL,
+        RETRY_DELAY_SECONDS,
+        TIMEOUT,
+    )
+    from .utils import trim_prompt
+except ImportError:  # script execution fallback
+    from config import FALLBACK_MODELS, MODELS, OLLAMA_URL, RETRY_DELAY_SECONDS, TIMEOUT
+    from utils import trim_prompt
 
 
 OOM_MARKERS = ("out of memory", "cuda", "memory")
+
+
+class ModelRunResult(TypedDict, total=False):
+    status: str
+    model: str
+    latency: float | None
+    attempts: int
+    response: str
+    error: str
+    used_fallback: bool
 
 
 def _looks_like_oom(message: str) -> bool:
@@ -15,7 +35,7 @@ def _looks_like_oom(message: str) -> bool:
     return any(marker in lowered for marker in OOM_MARKERS)
 
 
-def run_model(model: str, prompt: str, retries: int = 2) -> Dict[str, object]:
+def run_model(model: str, prompt: str, retries: int = 2) -> ModelRunResult:
     print(f"\n[RUNNING: {model}]")
     active_prompt = prompt
     last_error = ""
@@ -57,7 +77,7 @@ def run_model(model: str, prompt: str, retries: int = 2) -> Dict[str, object]:
                 active_prompt = trim_prompt(active_prompt)
 
         if attempt < max_attempts:
-            time.sleep(2)
+            time.sleep(RETRY_DELAY_SECONDS)
 
     return {
         "status": "failed",
@@ -69,7 +89,7 @@ def run_model(model: str, prompt: str, retries: int = 2) -> Dict[str, object]:
     }
 
 
-def run_task(task_type: str, prompt: str) -> Dict[str, object]:
+def run_task(task_type: str, prompt: str) -> ModelRunResult:
     model = MODELS.get(task_type, MODELS["reasoning"])
     result = run_model(model, prompt)
 
