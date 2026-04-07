@@ -47,8 +47,8 @@ def detect_task_type(problem: str) -> str:
 def _template_for(task_type: str) -> str:
     path = PROMPT_TEMPLATES_DIR / f"{task_type}.md"
     default = (
-        "You are an expert AI system.\\n\\n"
-        "Problem:\\n{problem}\\n\\n"
+        "You are an expert AI system.\n\n"
+        "Problem:\n{problem}\n\n"
         "Provide a clear and structured answer."
     )
     return load_skill_text(path, default=default)

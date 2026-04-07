@@ -19,8 +19,11 @@ def run_model(model: str, prompt: str, retries: int = 2) -> Dict[str, object]:
     print(f"\n[RUNNING: {model}]")
     active_prompt = prompt
     last_error = ""
+    max_attempts = retries + 1
+    attempt_count = 0
 
-    for attempt in range(1, retries + 2):
+    for attempt in range(1, max_attempts + 1):
+        attempt_count = attempt
         try:
             start = time.time()
             response = requests.post(
@@ -53,14 +56,14 @@ def run_model(model: str, prompt: str, retries: int = 2) -> Dict[str, object]:
             if _looks_like_oom(last_error):
                 active_prompt = trim_prompt(active_prompt)
 
-        if attempt < retries + 1:
+        if attempt < max_attempts:
             time.sleep(2)
 
     return {
         "status": "failed",
         "model": model,
         "latency": None,
-        "attempts": retries + 1,
+        "attempts": attempt_count,
         "response": "",
         "error": last_error or "MODEL_FAILED",
     }
