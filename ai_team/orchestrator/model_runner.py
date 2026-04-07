@@ -40,10 +40,8 @@ def run_model(model: str, prompt: str, retries: int = 2) -> ModelRunResult:
     active_prompt = prompt
     last_error = ""
     max_attempts = retries + 1
-    attempt_count = 0
 
     for attempt in range(1, max_attempts + 1):
-        attempt_count = attempt
         try:
             start = time.time()
             response = requests.post(
@@ -60,7 +58,7 @@ def run_model(model: str, prompt: str, retries: int = 2) -> ModelRunResult:
                     "status": "ok",
                     "model": model,
                     "latency": latency,
-                    "attempts": attempt_count,
+                    "attempts": attempt,
                     "response": text,
                     "error": "",
                 }
@@ -83,7 +81,7 @@ def run_model(model: str, prompt: str, retries: int = 2) -> ModelRunResult:
         "status": "failed",
         "model": model,
         "latency": None,
-        "attempts": attempt_count,
+        "attempts": max_attempts,
         "response": "",
         "error": last_error or "Maximum retry attempts exceeded",
     }
